@@ -1,0 +1,12 @@
+{
+  "servers": {
+    ".js":  { "command": "typescript-language-server", "args": ["--stdio"] },
+    ".jsx": { "command": "typescript-language-server", "args": ["--stdio"] },
+    ".ts":  { "command": "typescript-language-server", "args": ["--stdio"] },
+    ".tsx": { "command": "typescript-language-server", "args": ["--stdio"] },
+    ".py":  { "command": "pyright-langserver",          "args": ["--stdio"] },
+    ".rb":  { "command": "solargraph",                  "args": ["stdio"]   },
+    ".go":  { "command": "gopls",                       "args": []          },
+    ".rs":  { "command": "rust-analyzer",               "args": []          }
+  }
+}

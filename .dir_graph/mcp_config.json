@@ -1,0 +1,20 @@
+{
+  "_comment": "DirGraph MCP Allowlist. Edit allowed_tools and allowed_paths to control Claude's access.",
+
+  "allowed_tools": [
+    "query_code_graph",
+    "load_graph",
+    "index_file",
+    "index_directory",
+    "save_graph",
+    "propose_session_plan",
+    "approve_session_plan",
+    "revoke_session_plan"
+  ],
+
+  "allowed_paths": [
+    "."
+  ],
+
+  "max_search_depth": 4
+}
