@@ -7,6 +7,9 @@
     "index_file",
     "index_directory",
     "save_graph",
+    "export_to_viewer",
+    "neo4j_health",
+    "neo4j_setup_schema",
     "propose_session_plan",
     "approve_session_plan",
     "revoke_session_plan"

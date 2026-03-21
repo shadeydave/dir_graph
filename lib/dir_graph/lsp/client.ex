@@ -26,6 +26,7 @@ defmodule DirGraph.LSP.Client do
   @doc """
   Spawns `cmd` with `args`, performs the LSP initialize handshake,
   and returns `{:ok, client}` or `{:error, reason}`.
+  Declares support for `documentSymbol` (hierarchical) and `callHierarchy`.
   """
   def start(cmd, args, root_path) do
     case System.find_executable(cmd) do
@@ -51,36 +52,115 @@ defmodule DirGraph.LSP.Client do
   end
 
   @doc """
-  Sends `textDocument/didOpen` + `textDocument/documentSymbol` for `file_path`.
-  Returns `{:ok, symbols, updated_client}` where `symbols` is a list of
-  LSP DocumentSymbol maps (possibly nested via "children").
+  Sends `textDocument/didOpen` for `file_path`. Returns the updated client.
+  Must be paired with `close_document/2`.
   """
-  def document_symbols(%__MODULE__{} = client, file_path) do
-    uri = file_uri(file_path)
+  def open_document(%__MODULE__{} = client, file_path) do
+    send_notification(client, "textDocument/didOpen", %{
+      textDocument: %{
+        uri: file_uri(file_path),
+        languageId: language_id_for(file_path),
+        version: 1,
+        text: File.read!(file_path)
+      }
+    })
+  end
 
-    client =
-      send_notification(client, "textDocument/didOpen", %{
-        textDocument: %{
-          uri: uri,
-          languageId: language_id_for(file_path),
-          version: 1,
-          text: File.read!(file_path)
-        }
-      })
+  @doc "Sends `textDocument/didClose` for `file_path`. Returns the updated client."
+  def close_document(%__MODULE__{} = client, file_path) do
+    send_notification(client, "textDocument/didClose", %{
+      textDocument: %{uri: file_uri(file_path)}
+    })
+  end
 
+  @doc """
+  Requests `textDocument/documentSymbol` for an already-open `file_path`.
+  Returns `{:ok, symbols, updated_client}`.
+  The file must have been opened with `open_document/2` first.
+  """
+  def fetch_symbols(%__MODULE__{} = client, file_path) do
     {client, id} = alloc_id(client)
 
     client =
       send_request(client, id, "textDocument/documentSymbol", %{
-        textDocument: %{uri: uri}
+        textDocument: %{uri: file_uri(file_path)}
       })
 
     case await_id(client, id) do
+      {:ok, result, client} -> {:ok, result || [], client}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Convenience wrapper: opens `file_path`, fetches document symbols, closes it.
+  Returns `{:ok, symbols, updated_client}`.
+  """
+  def document_symbols(%__MODULE__{} = client, file_path) do
+    client = open_document(client, file_path)
+
+    case fetch_symbols(client, file_path) do
       {:ok, result, client} ->
-        client = send_notification(client, "textDocument/didClose", %{
-          textDocument: %{uri: uri}
-        })
-        {:ok, result || [], client}
+        {:ok, result, close_document(client, file_path)}
+
+      {:error, reason} ->
+        close_document(client, file_path)
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns outgoing calls from the symbol at the given LSP position
+  (0-indexed `line` and `character`). The file must be open.
+
+  Calls `textDocument/prepareCallHierarchy` to resolve the symbol at that
+  position, then `callHierarchy/outgoingCalls` for each returned item.
+
+  Returns `{:ok, calls, updated_client}` where each call is
+  `%{name: name, uri: target_uri, line: target_line}` (1-indexed line).
+  Errors from individual items are silently skipped — a broken call
+  hierarchy for one symbol does not abort the whole file.
+  """
+  def outgoing_calls(%__MODULE__{} = client, file_path, lsp_line, lsp_char) do
+    {client, id} = alloc_id(client)
+
+    client =
+      send_request(client, id, "textDocument/prepareCallHierarchy", %{
+        textDocument: %{uri: file_uri(file_path)},
+        position: %{line: lsp_line, character: lsp_char}
+      })
+
+    case await_id(client, id) do
+      {:ok, nil, client} ->
+        {:ok, [], client}
+
+      {:ok, [], client} ->
+        {:ok, [], client}
+
+      {:ok, items, client} when is_list(items) ->
+        Enum.reduce(items, {:ok, [], client}, fn item, {:ok, acc, c} ->
+          {c, id2} = alloc_id(c)
+          c = send_request(c, id2, "callHierarchy/outgoingCalls", %{item: item})
+
+          case await_id(c, id2) do
+            {:ok, calls, c} when is_list(calls) ->
+              parsed =
+                Enum.map(calls, fn call ->
+                  to = Map.get(call, "to", %{})
+                  lsp_target_line = get_in(to, ["selectionRange", "start", "line"]) || 0
+                  %{
+                    name: Map.get(to, "name", "unknown"),
+                    uri:  Map.get(to, "uri", ""),
+                    line: lsp_target_line + 1
+                  }
+                end)
+
+              {:ok, acc ++ parsed, c}
+
+            _ ->
+              {:ok, acc, c}
+          end
+        end)
 
       {:error, reason} ->
         {:error, reason}
@@ -114,7 +194,8 @@ defmodule DirGraph.LSP.Client do
         rootUri: file_uri(root_path),
         capabilities: %{
           textDocument: %{
-            documentSymbol: %{hierarchicalDocumentSymbolSupport: true}
+            documentSymbol: %{hierarchicalDocumentSymbolSupport: true},
+            callHierarchy: %{}
           }
         }
       })

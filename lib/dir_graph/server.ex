@@ -25,7 +25,7 @@ defmodule DirGraph.Server do
   # ----------------------------------------------------------------
 
   def start_link(_opts) do
-    GenServer.start_link(__MODULE__, %{graph: CG.new(), lsp_clients: %{}, manifest: %{}}, name: __MODULE__)
+    GenServer.start_link(__MODULE__, %{graph: CG.new(), lsp_clients: %{}, manifest: %{}, project_name: nil}, name: __MODULE__)
   end
 
   @doc "Index a single file, merging it into the in-memory graph. Blocks until complete."
@@ -63,6 +63,11 @@ defmodule DirGraph.Server do
     GenServer.call(__MODULE__, {:affected_by, search_term, opts})
   end
 
+  @doc "Finds test nodes that exercise `search_term` via inbound BFS filtered to test/spec paths."
+  def find_tests(search_term, opts \\ []) do
+    GenServer.call(__MODULE__, {:find_tests, search_term, opts})
+  end
+
   @doc "Returns counts and topology stats for the current graph."
   def workspace_stats do
     GenServer.call(__MODULE__, :workspace_stats)
@@ -97,6 +102,16 @@ defmodule DirGraph.Server do
   @doc "Returns the full in-memory graph (for inspection or serialization)."
   def get_graph do
     GenServer.call(__MODULE__, :get_graph)
+  end
+
+  @doc """
+  Serializes the current graph to JSON files under ~/sites/diffs/{project}/ and
+  opens the viewer in the system browser. Creates full_ast.json and (if missing)
+  an empty diff_ledger.json. Idempotent — re-exporting overwrites full_ast.json
+  but never truncates an existing ledger.
+  """
+  def export_viewer_data(project) do
+    GenServer.call(__MODULE__, {:export_viewer_data, project}, :infinity)
   end
 
   @doc "Remove all graph nodes belonging to `file_path` (called by Watcher on file deletion)."
@@ -151,6 +166,13 @@ defmodule DirGraph.Server do
     # Background: embed newly indexed nodes for semantic search.
     RAG.index_file(resolved, file_path)
 
+    # Background: persist new/updated nodes + their edges to Neo4j.
+    if state.project_name do
+      project = state.project_name
+      file_nodes = file_node_ids(resolved, file_path)
+      Task.start(fn -> sync_file_to_neo4j(project, resolved, file_path, file_nodes) end)
+    end
+
     {:reply, :ok, %{state | graph: resolved, lsp_clients: new_clients}}
   end
 
@@ -161,9 +183,14 @@ defmodule DirGraph.Server do
     graph    = reload_content_nodes(graph)
     manifest = DirGraph.Manifest.from_graph(graph)
 
+    project  = Path.basename(Path.expand(dir_path))
+    RAG.set_project(project)
     RAG.index_graph(graph)
 
-    {:reply, :ok, %{state | graph: graph, manifest: manifest}}
+    # Background: full graph sync to Neo4j.
+    Task.start(fn -> DirGraph.Neo4j.persist_graph(project, graph) end)
+
+    {:reply, :ok, %{state | graph: graph, manifest: manifest, project_name: project}}
   end
 
   @impl true
@@ -195,6 +222,11 @@ defmodule DirGraph.Server do
     manifest = Map.delete(state.manifest, file_path)
 
     RAG.remove_file_nodes(removed_ids)
+
+    if state.project_name do
+      project = state.project_name
+      Task.start(fn -> DirGraph.Neo4j.purge_file_nodes(project, file_path) end)
+    end
 
     {:reply, :ok, %{state | graph: graph, manifest: manifest}}
   end
@@ -236,7 +268,7 @@ defmodule DirGraph.Server do
 
       vertex_id ->
         subgraph = Analyzer.extract_slice(state.graph, vertex_id, depth)
-        payload  = Analyzer.format_for_llm(subgraph, include_code: include_code)
+        payload  = Analyzer.format_for_llm(subgraph, include_code: include_code, full_graph: state.graph)
         {:reply, {:ok, payload}, state}
     end
   end
@@ -252,9 +284,14 @@ defmodule DirGraph.Server do
 
       vertex_id ->
         subgraph = Analyzer.affected_by(state.graph, vertex_id, depth)
-        payload  = Analyzer.format_for_llm(subgraph, include_code: include_code)
+        payload  = Analyzer.format_for_llm(subgraph, include_code: include_code, full_graph: state.graph)
         {:reply, {:ok, payload}, state}
     end
+  end
+
+  @impl true
+  def handle_call({:find_tests, search_term, opts}, _from, state) do
+    {:reply, Analyzer.find_tests(state.graph, search_term, opts), state}
   end
 
   @impl true
@@ -288,14 +325,19 @@ defmodule DirGraph.Server do
       |> Enum.sort_by(& &1.degree, :desc)
       |> Enum.take(10)
 
+    calls_edges     = Enum.count(edges, fn e -> e.label == "CALLS" end)
+    capability_gaps = DirGraph.LSP.ServerRegistry.gap_report()
+
     stats = %{
       total_nodes:      length(vertices),
       total_edges:      length(edges),
+      calls_edges:      calls_edges,
       files_indexed:    Map.get(nodes_by_type, "File", 0),
       nodes_by_type:    nodes_by_type,
       top_connected:    top_connected,
       watched_dirs:     DirGraph.Watcher.watched_dirs(),
-      embeddings_ready: DirGraph.RAG.size()
+      embeddings_ready: DirGraph.RAG.size(),
+      capability_gaps:  capability_gaps
     }
 
     {:reply, stats, state}
@@ -326,7 +368,7 @@ defmodule DirGraph.Server do
             |> Enum.uniq()
 
           subgraph = Graph.subgraph(state.graph, all_vertex_ids)
-          payload  = Analyzer.format_for_llm(subgraph, include_code: include_code)
+          payload  = Analyzer.format_for_llm(subgraph, include_code: include_code, full_graph: state.graph)
 
           # Annotate with which nodes were the semantic entry points.
           matches =
@@ -476,6 +518,60 @@ defmodule DirGraph.Server do
   end
 
   @impl true
+  def handle_call({:export_viewer_data, project}, _from, state) do
+    nodes =
+      CG.all_nodes(state.graph)
+      |> Enum.map(fn n ->
+        %{
+          "id"   => to_string(n[:id]   || ""),
+          "type" => to_string(n[:type] || ""),
+          "name" => to_string(n[:name] || ""),
+          "file" => to_string(n[:file] || ""),
+          "line" => n[:line] || 0
+        }
+      end)
+
+    edges =
+      Graph.edges(state.graph)
+      |> Enum.map(fn e ->
+        %{"source" => e.v1, "target" => e.v2, "rel" => to_string(e.label)}
+      end)
+
+    ast = %{
+      "project"     => project,
+      "exported_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "node_count"  => length(nodes),
+      "edge_count"  => length(edges),
+      "nodes"       => nodes,
+      "edges"       => edges
+    }
+
+    diffs_dir   = Path.expand("~/sites/diffs/#{project}")
+    ast_path    = Path.join(diffs_dir, "full_ast.json")
+    ledger_path = Path.join(diffs_dir, "diff_ledger.json")
+
+    File.mkdir_p!(diffs_dir)
+    File.write!(ast_path, Jason.encode!(ast, pretty: true))
+
+    unless File.exists?(ledger_path) do
+      ledger = %{"project" => project, "base_ast" => "full_ast.json", "diffs" => []}
+      File.write!(ledger_path, Jason.encode!(ledger, pretty: true))
+    end
+
+    System.cmd("open", ["http://localhost:5173/?project=#{project}"])
+
+    result = %{
+      status:  "ok",
+      path:    diffs_dir,
+      nodes:   length(nodes),
+      edges:   length(edges),
+      message: "Exported #{length(nodes)} nodes, #{length(edges)} edges. Opening viewer at http://localhost:5173/?project=#{project}"
+    }
+
+    {:reply, result, state}
+  end
+
+  @impl true
   def terminate(_reason, state) do
     Enum.each(state.lsp_clients, fn {_cmd, client} ->
       try do
@@ -560,6 +656,45 @@ defmodule DirGraph.Server do
   # Put a map key only when the value is non-nil (for partial updates).
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Collect vertex IDs belonging to a file.
+  defp file_node_ids(graph, file_path) do
+    Graph.vertices(graph)
+    |> Enum.filter(fn vid ->
+      case CG.get_label(graph, vid) do
+        %{file: ^file_path} -> true
+        %{path: ^file_path} -> true
+        _ -> false
+      end
+    end)
+    |> MapSet.new()
+  end
+
+  # Persist incremental file changes to Neo4j: purge old nodes, upsert new ones + relevant edges.
+  defp sync_file_to_neo4j(project, graph, file_path, file_node_set) do
+    DirGraph.Neo4j.purge_file_nodes(project, file_path)
+
+    nodes =
+      file_node_set
+      |> Enum.flat_map(fn vid ->
+        case CG.get_label(graph, vid) do
+          nil -> []
+          n   -> [%{"node_id" => to_string(n[:id] || ""), "type" => to_string(n[:type] || ""),
+                    "name"    => to_string(n[:name] || ""), "file" => to_string(n[:file] || ""),
+                    "line"    => n[:line] || 0}]
+        end
+      end)
+
+    edges =
+      Graph.edges(graph)
+      |> Enum.filter(fn e -> MapSet.member?(file_node_set, e.v1) or MapSet.member?(file_node_set, e.v2) end)
+      |> Enum.map(fn e -> %{"source" => e.v1, "target" => e.v2, "rel" => to_string(e.label)} end)
+
+    with :ok <- DirGraph.Neo4j.persist_project(project),
+         :ok <- DirGraph.Neo4j.persist_nodes(project, nodes) do
+      DirGraph.Neo4j.persist_edges(project, edges)
+    end
+  end
 
   @root_markers ~w(package.json mix.exs Cargo.toml go.mod pyproject.toml .git)
 

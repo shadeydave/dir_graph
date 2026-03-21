@@ -1,0 +1,57 @@
+{
+  "node_count": 6,
+  "edge_count": 5,
+  "nodes": [
+    {
+      "id": "Function:login/2:L45:lib/auth.ex",
+      "type": "Function",
+      "name": "login",
+      "file": "/abs/path/lib/auth.ex",
+      "line": 45,
+      "calls": ["get_user", "verify_password", "audit_log"],
+      "callers": ["handle_request"]
+    },
+    {
+      "id": "Module:MyApp.Auth",
+      "type": "Module",
+      "name": "MyApp.Auth",
+      "file": "/abs/path/lib/auth.ex",
+      "line": 1
+    },
+    {
+      "id": "Function:get_user/1:L12:lib/auth.ex",
+      "type": "Function",
+      "name": "get_user",
+      "file": "/abs/path/lib/auth.ex",
+      "line": 12
+    },
+    {
+      "id": "Function:verify_password/2:L25:lib/auth.ex",
+      "type": "Function",
+      "name": "verify_password",
+      "file": "/abs/path/lib/auth.ex",
+      "line": 25
+    },
+    {
+      "id": "Call:audit_log",
+      "type": "Call",
+      "name": "audit_log",
+      "file": "unknown",
+      "line": 0
+    },
+    {
+      "id": "Function:handle_request/1:L100:lib/router.ex",
+      "type": "Function",
+      "name": "handle_request",
+      "file": "/abs/path/lib/router.ex",
+      "line": 100
+    }
+  ],
+  "edges": [
+    { "source": "Module:MyApp.Auth", "target": "Function:login/2:L45:lib/auth.ex", "rel": "DEFINES" },
+    { "source": "Function:login/2:L45:lib/auth.ex", "target": "Function:get_user/1:L12:lib/auth.ex", "rel": "CALLS" },
+    { "source": "Function:login/2:L45:lib/auth.ex", "target": "Function:verify_password/2:L25:lib/auth.ex", "rel": "CALLS" },
+    { "source": "Function:login/2:L45:lib/auth.ex", "target": "Call:audit_log", "rel": "CALLS" },
+    { "source": "Function:handle_request/1:L100:lib/router.ex", "target": "Function:login/2:L45:lib/auth.ex", "rel": "CALLS" }
+  ]
+}

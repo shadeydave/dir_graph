@@ -53,6 +53,11 @@ defmodule DirGraph.Analyzer do
     end
   end
 
+  # Max callers shown inline per node. Hub nodes (e.g. a shared util called by
+  # hundreds of functions) would bloat the output without this cap. The full
+  # count is still available via the `callers_total` field when truncated.
+  @callers_display_cap 10
+
   # Hard ceiling on BFS depth. Prevents exponential node explosion on
   # dense graphs (e.g. a file importing 10 modules, each with 20 symbols).
   # Depth 3 gives: matched node → its direct relations → their relations.
@@ -91,12 +96,28 @@ defmodule DirGraph.Analyzer do
   - `include_types` — filter to a list of type strings, or `:all` (default)
   - `include_code`  — when `true`, embed actual source lines per node as `code` field,
                       eliminating the need for separate Read calls (default `false`)
+  - `full_graph`    — when provided, each node gains `calls` and `callers` fields
+                      derived from CALLS edges in the full graph. Nodes at the boundary
+                      of the slice still announce what's beyond them ("onion-skin" metadata).
+                      `callers` is capped at #{@callers_display_cap} entries; if there are
+                      more, a `callers_total` count is included alongside.
 
   Edge entries include source, target, and the relationship label.
   """
   def format_for_llm(subgraph, opts \\ []) do
     include_types = Keyword.get(opts, :include_types, :all)
     include_code  = Keyword.get(opts, :include_code,  false)
+    full_graph    = Keyword.get(opts, :full_graph,    nil)
+
+    # Precompute calls/callers once for the whole slice. Derived from CALLS edges
+    # in the full graph so boundary nodes show what's beyond the current slice.
+    {calls_map, callers_map} = build_call_maps(full_graph)
+
+    # Warn early if the graph has no CALLS edges at all. This prevents the LLM
+    # from reasoning confidently about call flows that were never extracted
+    # (e.g. LSP call hierarchy server not installed or not supported).
+    calls_unavailable =
+      full_graph != nil and map_size(calls_map) == 0 and map_size(callers_map) == 0
 
     nodes =
       subgraph
@@ -134,7 +155,7 @@ defmodule DirGraph.Analyzer do
               node
             end
 
-          [node]
+          [attach_call_metadata(node, vid, calls_map, callers_map)]
         else
           []
         end
@@ -147,12 +168,21 @@ defmodule DirGraph.Analyzer do
         %{source: edge.v1, target: edge.v2, rel: edge.label}
       end)
 
-    %{
+    payload = %{
       node_count: length(nodes),
       edge_count: length(edges),
       nodes: nodes,
       edges: edges
     }
+
+    if calls_unavailable do
+      Map.put(payload, :_note,
+        "No CALLS edges found in graph. Call hierarchy was not extracted — " <>
+        "check that the language server is installed and supports callHierarchy. " <>
+        "Do not make assertions about call flows or knock-on effects based on this slice.")
+    else
+      payload
+    end
   end
 
   @doc """
@@ -189,6 +219,140 @@ defmodule DirGraph.Analyzer do
     end)
 
     IO.puts("")
+  end
+
+  # ----------------------------------------------------------------
+  # Test finder
+  # ----------------------------------------------------------------
+
+  # Path fragments and file suffixes that identify test files.
+  @test_path_patterns ~w(/test/ /spec/ /tests/ /__tests__/)
+  @test_file_suffixes ~w(_test.exs _test.ex _spec.rb .test.ts .spec.ts
+                         .test.js .spec.js .test.jsx .spec.jsx
+                         _test.go _test.py test_.py Test.php)
+
+  @doc """
+  Finds test nodes that exercise `search_term` by running an inbound BFS
+  (`affected_by`) and filtering results to nodes located in test/spec directories.
+
+  Returns `{:ok, %{source_node, test_count, tests}}` where each test entry
+  includes the node id, name, file, line, and a ready-to-run shell command.
+  Returns `{:error, :not_found}` if no node matches the search term.
+
+  Depth defaults to 3 because test files are often 2–3 hops from the functions
+  they exercise (function → module → test module → test function).
+  """
+  def find_tests(graph, search_term, opts \\ []) do
+    depth = Keyword.get(opts, :depth, 3)
+
+    case find_node(graph, search_term) do
+      nil ->
+        {:error, :not_found}
+
+      vertex_id ->
+        subgraph = affected_by(graph, vertex_id, depth)
+
+        tests =
+          subgraph
+          |> Graph.vertices()
+          |> Enum.flat_map(fn vid ->
+            case CG.get_label(graph, vid) do
+              %{type: type, file: file, line: line, name: name}
+                  when type in ["Function", "Module"] and is_binary(file) ->
+                if test_file?(file) do
+                  [%{id: vid, name: name, file: file, line: line,
+                     command: test_command(file, line, name)}]
+                else
+                  []
+                end
+
+              _ ->
+                []
+            end
+          end)
+
+        {:ok, %{source_node: vertex_id, test_count: length(tests), tests: tests}}
+    end
+  end
+
+  defp test_file?(path) do
+    Enum.any?(@test_path_patterns, &String.contains?(path, &1)) or
+      Enum.any?(@test_file_suffixes, &String.ends_with?(path, &1))
+  end
+
+  defp test_command(file, line, name) do
+    cond do
+      String.ends_with?(file, ".exs") or String.ends_with?(file, "_test.ex") ->
+        "mix test #{file}:#{line}"
+
+      String.ends_with?(file, "_spec.rb") ->
+        "bundle exec rspec #{file}:#{line}"
+
+      Enum.any?(~w(.test.ts .spec.ts .test.js .spec.js .test.jsx .spec.jsx),
+                &String.ends_with?(file, &1)) ->
+        "npx jest --testPathPattern=#{file}"
+
+      String.ends_with?(file, "_test.go") ->
+        "go test -run #{name} ./..."
+
+      String.ends_with?(file, "_test.py") or String.ends_with?(file, "test_.py") ->
+        "pytest #{file}::#{name}"
+
+      String.ends_with?(file, "Test.php") ->
+        "vendor/bin/phpunit #{file}"
+
+      true ->
+        "# unknown runner — check #{file}"
+    end
+  end
+
+  # ----------------------------------------------------------------
+  # Onion-skin helpers
+  # ----------------------------------------------------------------
+
+  # Builds {calls_map, callers_map} from all CALLS edges in the full graph.
+  # calls_map:   node_id → [name_of_callee, ...]
+  # callers_map: node_id → [name_of_caller, ...]
+  # Computed once per format_for_llm call, then applied per-node.
+  defp build_call_maps(nil), do: {%{}, %{}}
+
+  defp build_call_maps(full_graph) do
+    calls_edges =
+      full_graph
+      |> Graph.edges()
+      |> Enum.filter(fn e -> e.label == "CALLS" end)
+
+    calls_map =
+      Enum.group_by(calls_edges, & &1.v1, fn e ->
+        case CG.get_label(full_graph, e.v2) do
+          %{name: n} -> n
+          _ -> e.v2
+        end
+      end)
+
+    callers_map =
+      Enum.group_by(calls_edges, & &1.v2, fn e ->
+        case CG.get_label(full_graph, e.v1) do
+          %{name: n} -> n
+          _ -> e.v1
+        end
+      end)
+
+    {calls_map, callers_map}
+  end
+
+  # Merges calls/callers metadata into a node map. Only adds fields when non-empty.
+  # Callers are capped at @callers_display_cap; excess is indicated by callers_total.
+  defp attach_call_metadata(node, vid, calls_map, callers_map) do
+    calls       = Map.get(calls_map, vid, [])
+    callers_all = Map.get(callers_map, vid, [])
+    callers     = Enum.take(callers_all, @callers_display_cap)
+    total       = length(callers_all)
+
+    node
+    |> then(fn n -> if calls != [],    do: Map.put(n, :calls,         calls),  else: n end)
+    |> then(fn n -> if callers != [],  do: Map.put(n, :callers,       callers), else: n end)
+    |> then(fn n -> if total > @callers_display_cap, do: Map.put(n, :callers_total, total), else: n end)
   end
 
   # ----------------------------------------------------------------

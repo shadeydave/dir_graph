@@ -1,0 +1,29 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: dir_graph_neo4j
+    restart: unless-stopped
+    ports:
+      - "7475:7474"   # Browser UI  → http://localhost:7475  (7474 taken by existing Neo4j)
+      - "7688:7687"   # Bolt protocol → localhost:7688       (7687 taken by existing Neo4j)
+    environment:
+      NEO4J_AUTH: neo4j/dirgraph
+      # Memory — conservative defaults, tune up if you have RAM to spare
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+      # APOC only — GDS has no community build for Neo4j 5.26 yet
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - dir_graph_neo4j_data:/data
+      - dir_graph_neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+volumes:
+  dir_graph_neo4j_data:
+  dir_graph_neo4j_logs:

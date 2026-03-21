@@ -29,6 +29,7 @@ defmodule DirGraph.MCP.Allowlist do
   @operational_tools ~w(
     query_code_graph
     affected_by
+    find_tests
     workspace_stats
     semantic_search
     add_content_node

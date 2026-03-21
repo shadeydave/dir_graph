@@ -26,7 +26,8 @@ Token savings:           ~99% fewer tokens
 Source files
      │
      ▼
-  Indexer  ──── parses AST / regex ────► Code Property Graph (in-memory)
+  Indexer  ── Elixir: real AST ────────► Code Property Graph (in-memory)
+             ── others: LSP ──────────►
                                                │
                                                ▼
                                Optional: Embeddings backend
@@ -59,7 +60,7 @@ Source files
               LLM gets only what it needs
 ```
 
-1. **Index** — DirGraph parses your source files (Elixir via the real AST, JS/TS via targeted regex) and builds an in-memory graph. Nodes represent files, modules, functions, classes, and call sites. Edges represent structural relationships: `CONTAINS`, `DEFINES`, `CALLS`, `IMPORTS`, `USES`, `REQUIRES`.
+1. **Index** — DirGraph parses your source files and builds an in-memory graph. Elixir files use the real AST (`Code.string_to_quoted/1`). All other languages (JS, TS, Python, Ruby, Go, Rust, and any language with an LSP server) are indexed via `textDocument/documentSymbol` through the appropriate language server. Nodes represent files, modules, functions, classes, and call sites. Edges represent structural relationships: `CONTAINS`, `DEFINES`, `CALLS`, `IMPORTS`, `USES`, `REQUIRES`.
 
 2. **Embed** — Optionally, each node is embedded via Ollama or OpenAI and stored in an ETS-backed VectorStore. This powers semantic search: "find me everything related to authentication" without knowing the exact function name.
 
@@ -67,7 +68,7 @@ Source files
 
 4. **Slice** — BFS traversal in both directions from the matched node, up to a configurable depth (hard cap: 3), extracts a subgraph of everything structurally connected to that concept.
 
-5. **Format** — The slice is serialized as a compact JSON payload. Every node includes its file path and line number, so the LLM (or you) can issue targeted `Read` calls at exact offsets rather than loading whole files. Optionally embed the source lines directly in the payload.
+5. **Format** — The slice is serialized as a compact JSON payload. Every node includes its file path and line number, so the LLM (or you) can issue targeted `Read` calls at exact offsets rather than loading whole files. Optionally embed the source lines directly in the payload. Each node also carries `calls` and `callers` fields — pre-computed from the full call graph — so even nodes at the boundary of a slice announce what lies beyond them without requiring a deeper traversal.
 
 ---
 
@@ -123,8 +124,31 @@ Non-code nodes that attach business meaning to the graph. They survive index reb
 
 | Language | Parser | Extracts |
 |---|---|---|
-| Elixir `.ex` / `.exs` | `Code.string_to_quoted/1` (real AST) | modules, public/private functions, macros, aliases, imports, uses, requires, remote calls |
-| JavaScript / TypeScript `.js .ts .jsx .tsx` | Targeted regex | imports, `require()`, function declarations, arrow functions, class declarations |
+| Elixir `.ex` / `.exs` | `Code.string_to_quoted/1` (real AST) | modules, public/private functions, macros, aliases, imports, uses, requires, remote calls, CALLS edges |
+| JavaScript / TypeScript `.js .ts .jsx .tsx` | LSP via `typescript-language-server` | files, modules, functions, arrow functions, classes, methods, import paths, CALLS edges |
+| Python `.py` | LSP via `pyright-langserver` | files, classes, functions, methods, import paths, CALLS edges |
+| PHP `.php` | LSP via `intelephense` | files, classes, functions, methods, import paths, CALLS edges |
+| Ruby `.rb` | LSP via `solargraph` | files, modules, classes, methods, import paths, CALLS edges |
+| Go `.go` | LSP via `gopls` | files, packages, functions, methods, import paths, CALLS edges |
+| Rust `.rs` | LSP via `rust-analyzer` | files, modules, functions, structs, impl methods, import paths, CALLS edges |
+| C / C++ `.c .h .cpp .cc .cxx .hpp` | LSP via `clangd` | files, functions, classes, structs, methods, import paths, CALLS edges |
+| Any other language | LSP via user-configured server | whatever `textDocument/documentSymbol` + `callHierarchy/outgoingCalls` returns |
+
+LSP servers ship with built-in defaults for the languages above but require the server executable to be on `PATH`. Add or override entries in `.dir_graph/lsp_servers.json` to support additional languages without any code changes.
+
+### Installing language servers
+
+DirGraph detects which servers are installed at startup and reports the gaps in `workspace_stats`. Each missing entry includes the exact install command. See [Capability Gap Reporting](#capability-gap-reporting--self-improvement) for the full workflow.
+
+| Server | Covers | Install |
+|---|---|---|
+| `typescript-language-server` | JS, TS, JSX, TSX | `npm install -g typescript-language-server typescript` |
+| `pyright-langserver` | Python | `npm install -g pyright` |
+| `intelephense` | PHP | `npm install -g intelephense` |
+| `solargraph` | Ruby | `gem install solargraph` |
+| `gopls` | Go | `go install golang.org/x/tools/gopls@latest` |
+| `rust-analyzer` | Rust | `rustup component add rust-analyzer` |
+| `clangd` | C, C++ | bundled with Xcode CLT on macOS; `brew install llvm` for a newer version |
 
 ---
 
@@ -197,7 +221,10 @@ Recursively indexes all supported files, skipping `node_modules`, `_build`, `dep
       "line": 45,
       "end_line": 52,
       "label": "login/2",
-      "visibility": "public"
+      "visibility": "public",
+      "calls": ["get_user", "verify_password", "audit_log"],
+      "callers": ["handle_request", "session_refresh"],
+      "callers_total": 2
     }
   ],
   "edges": [
@@ -206,7 +233,16 @@ Recursively indexes all supported files, skipping `node_modules`, `_build`, `dep
 }
 ```
 
-If the search term was fuzzy-matched, the payload includes a `_fuzzy_match` key noting what was requested vs. what was matched.
+**Node fields:**
+- `calls` — names of functions this node directly calls (derived from CALLS edges in the full graph; absent if no outgoing calls)
+- `callers` — names of functions that call this node, capped at 10 (absent if no callers)
+- `callers_total` — total caller count when it exceeds the display cap; signals hub nodes
+- `code` — source lines for this node, present only when `include_code: true` is passed
+- `visibility` — `"public"` or `"private"` for Elixir functions; absent for other languages
+
+**Payload-level fields:**
+- `_fuzzy_match` — present when the search term was fuzzy-matched; shows what was requested vs. what was matched
+- `_note` — present when call hierarchy data is absent from the graph (e.g. language server not installed); instructs the LLM not to make assertions about call flows
 
 ---
 
@@ -247,7 +283,7 @@ Add this to `~/.claude/settings.json`:
 | `query_code_graph` | Search for a concept by name. Returns a semantic slice with file + line per node. |
 | `affected_by` | Find everything that would break if a given node changes (inbound BFS). |
 | `semantic_search` | Find nodes by meaning, not name. Requires embeddings backend. |
-| `workspace_stats` | Returns node count, edge count, embeddings status, and content node count. |
+| `workspace_stats` | Returns node/edge counts, `calls_edges` count, embeddings status, and `capability_gaps` (missing language servers with install commands). |
 
 #### Graph management tools
 
@@ -257,7 +293,9 @@ Add this to `~/.claude/settings.json`:
 | `index_file` | Index a single file into the in-memory graph. |
 | `load_graph` | Load a pre-compiled `.bin` graph (fast — use this at session start). |
 | `save_graph` | Persist the current in-memory graph to a `.bin` file. |
-| `remove_file` | Remove a file's nodes from the graph (e.g. after deletion). |
+| `sync_graph` | Diff the manifest against current disk state and re-index only changed files. |
+| `watch_directory` | Start a file-system watcher that keeps the graph live as files change. |
+| `unwatch_directory` | Stop the watcher for a directory. |
 
 #### Content node tools
 
@@ -271,11 +309,34 @@ Non-code nodes that survive graph rebuilds. Use these to attach business rules, 
 | `find_implementations` | Find code nodes that implement a given content node. |
 | `list_content_nodes` | List all content nodes, optionally filtered by type. |
 
-#### Mutation tools
+#### Process tools
+
+Spawn and monitor long-running OS processes (build servers, test runners, dev servers) from within an MCP session.
 
 | Tool | Description |
 |---|---|
-| `apply_diff` | Apply an LLM-generated diff (node-level replacements) back to source files. Validates syntax before writing. |
+| `spawn_process` | Start a named OS process and begin buffering its output. |
+| `list_processes` | List all running managed processes and their status. |
+| `read_output` | Read buffered output from a process (ring buffer, last 500 lines). |
+| `tail_output` | Stream new output lines from a process since a given cursor. |
+| `stop_process` | Stop a managed process by name. |
+
+#### Attempt ledger tools
+
+Tracks LLM mutation attempts per problem key to detect flip-flop loops and diagnostic regressions.
+
+| Tool | Description |
+|---|---|
+| `record_attempt` | Record a fix attempt for a problem key. Accepts an optional `diagnostic` string (test output, error message) whose fingerprint is compared against the previous attempt — if the same error recurs despite different code, a targeted "wrong mental model" warning fires before the count-based thresholds. |
+| `resolve_problem` | Mark a problem as resolved, clearing its active attempt counter while retaining history for recurrence detection. |
+| `list_problems` | List all open (unresolved) problem keys sorted by attempt count descending. |
+| `reset_ledger` | Clear all attempt history for the session. |
+
+#### Test selection tools
+
+| Tool | Description |
+|---|---|
+| `find_tests` | Given a function or module name, runs an inbound BFS (`affected_by`) to depth 3 and filters the result to nodes in test/spec directories. Returns each test's name, file, line, and a ready-to-run shell command (supports Elixir/ExUnit, Ruby/RSpec, JS/TS/Jest, Go, Python/pytest, PHP/PHPUnit). |
 
 #### Planning tools
 
@@ -291,10 +352,15 @@ At the start of any session on a project with a pre-built graph:
 
 ```
 1. load_graph("/path/to/project.bin")
-2. workspace_stats()                     ← confirms what's loaded
+2. workspace_stats()                     ← confirms what's loaded; check calls_edges
+                                           and capability_gaps before doing any analysis
 3. query_code_graph("login")             ← before reading any file
 4. Read file at returned file + line     ← targeted, not whole file
 ```
+
+If `workspace_stats` shows `calls_edges: 0` alongside Function nodes, call hierarchy
+was not extracted. Check `capability_gaps` for the install command and offer to run it
+via `spawn_process`. After installation, call `sync_graph` to rebuild with call data.
 
 For exploratory queries where you don't know the exact name:
 
@@ -302,6 +368,19 @@ For exploratory queries where you don't know the exact name:
 1. semantic_search("user authentication flow")   ← finds relevant entry nodes
 2. query_code_graph("<returned node id>")        ← BFS from there
 ```
+
+When editing a function and wanting surgical regression coverage:
+
+```
+1. find_tests("function_name")                  ← get the minimal test set
+2. spawn_process("tests", command)              ← run the targeted tests
+3. read_output("tests")                         ← capture results
+4. record_attempt("function_name", <output>)    ← fingerprint-tracked attempt
+```
+
+If `record_attempt` returns a `same_error` warning, the diagnostic fingerprint matched
+the previous attempt — the root cause analysis is likely wrong. Re-read the affected_by
+slice and reconsider before trying again.
 
 ---
 
@@ -350,6 +429,119 @@ The VectorStore uses an ETS table (`:protected`, named `:dir_graph_vectors`) for
 
 ---
 
+## Call Hierarchy & Onion-Skin Metadata
+
+Structural graphs tell you what exists. Call graphs tell you what flows. DirGraph extracts both.
+
+### How call edges are built
+
+For Elixir, remote calls are extracted directly from the AST during the index pass — every `Module.function(args)` expression becomes a `CALLS` edge in the graph.
+
+For all LSP-backed languages (JS, TS, PHP, Python, Ruby, Go, Rust, C/C++), DirGraph uses the LSP call hierarchy protocol (LSP 3.16+):
+
+1. After `textDocument/documentSymbol` builds the symbol tree for a file, the file is kept open.
+2. For each callable symbol (Function, Method, Constructor), DirGraph calls `textDocument/prepareCallHierarchy` at the symbol's position to get a `CallHierarchyItem`.
+3. `callHierarchy/outgoingCalls` is called on each item, returning every function that symbol calls — with the target's file, line, and name resolved by the language server.
+4. A directed `CALLS` edge is added from the caller node to the target. If the target has already been indexed (its node exists in the graph), the edge links directly to it. If the target is external or not yet indexed, a lightweight `Call` placeholder node is created.
+5. The file is closed. The process repeats for every callable in the file.
+
+Because the language server resolves call targets, cross-file calls link to the actual target node — not a dangling string. This means `affected_by` works across files for all supported languages, not just Elixir.
+
+### Onion-skin metadata
+
+Every node in a slice carries two additional fields derived from the full graph at query time:
+
+- **`calls`** — the names of functions this node directly calls (outgoing CALLS edges)
+- **`callers`** — the names of functions that call this node (incoming CALLS edges), capped at 10 with a `callers_total` count when there are more
+
+These fields are computed from the complete graph, not just the subgraph in the current slice. This means a node at the **boundary** of a slice — one whose neighbors weren't BFS-expanded — still announces what lies beyond it. The LLM doesn't need to request a wider slice to understand the flow topology; the road signs are baked into the nodes it already has.
+
+```json
+{
+  "id": "Function:authorize_payment/2:L22:lib/billing.ex",
+  "type": "Function",
+  "name": "authorize_payment",
+  "file": "lib/billing.ex",
+  "line": 22,
+  "calls": ["validate_amount", "fetch_approver", "audit_log"],
+  "callers": ["checkout", "retry_job", "admin_override"],
+  "callers_total": 3
+}
+```
+
+Even if `checkout`, `retry_job`, and `admin_override` are not in this slice, the LLM knows they exist and call this function. This is the difference between a node that's opaque at the edge of a slice and one that's self-describing about its position in the call landscape.
+
+### Hub node handling
+
+A utility function called by hundreds of other functions would produce an enormous `callers` list. The display cap (10 entries) prevents this from bloating the payload. When the cap is hit, `callers_total` gives the true count so the LLM knows how widely the function is used without seeing every caller name.
+
+### Call graph integrity signals
+
+Two signals surface in every response to prevent an LLM from reasoning confidently about call flows that were never extracted:
+
+1. **`calls_edges` in `workspace_stats`** — a count of all CALLS edges in the graph. If this is `0` alongside a large number of Function nodes, call hierarchy extraction did not run (language server missing or not supporting `callHierarchy`).
+
+2. **`_note` in slice payloads** — when the server holds a full graph but it contains no CALLS edges, every slice response includes an explicit instruction not to make assertions about call flows or knock-on effects. The LLM is informed, not silently wrong.
+
+---
+
+## Capability Gap Reporting & Self-Improvement
+
+DirGraph checks which LSP servers are installed every time `workspace_stats` is called. The result is a structured `capability_gaps` report:
+
+```json
+{
+  "capability_gaps": {
+    "available": [
+      { "server": "typescript-language-server", "extensions": [".js", ".jsx", ".ts", ".tsx"] },
+      { "server": "clangd", "extensions": [".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"] }
+    ],
+    "missing": [
+      {
+        "server": "intelephense",
+        "extensions": [".php"],
+        "description": "Symbol extraction and call hierarchy for PHP",
+        "install": "npm install -g intelephense",
+        "notes": "Free tier covers all DirGraph features."
+      }
+    ]
+  }
+}
+```
+
+Each missing entry includes everything needed to act on it: the server name, what it enables, the exact install command, and any relevant notes.
+
+### The self-improvement loop
+
+Because DirGraph already has `spawn_process` and `tail_output`, an LLM session can close its own capability gaps without leaving the conversation:
+
+```
+1. workspace_stats()
+   → capability_gaps.missing contains "intelephense" for PHP files
+
+2. Claude explains the gap to the user and proposes the fix:
+   "Your PHP files won't have call graphs. Want me to install intelephense?
+    One command: npm install -g intelephense"
+
+3. User approves.
+
+4. spawn_process("install-intelephense", "npm install -g intelephense")
+   tail_output("install-intelephense")   ← monitors progress live
+
+5. sync_graph("/path/to/project")
+   → Re-indexes changed/new files with the now-available language server
+
+6. workspace_stats()
+   → intelephense now in capability_gaps.available
+   → calls_edges > 0 for PHP files
+```
+
+No manual intervention, no restarting the server, no reconfiguration. The graph improves itself within the session.
+
+This pattern works for any language server in the registry. If a project adds Go files and `gopls` isn't installed, the next `workspace_stats` call surfaces it and the loop runs again.
+
+---
+
 ## Content Nodes
 
 Code graphs represent structure. Content nodes let you attach intent.
@@ -385,11 +577,23 @@ Create `.dir_graph/mcp_config.json` in the project root:
     "index_directory",
     "index_file",
     "save_graph",
+    "sync_graph",
+    "watch_directory",
+    "unwatch_directory",
     "add_content_node",
     "update_content_node",
     "delete_content_node",
     "find_implementations",
     "list_content_nodes",
+    "spawn_process",
+    "list_processes",
+    "read_output",
+    "tail_output",
+    "stop_process",
+    "record_attempt",
+    "resolve_problem",
+    "list_problems",
+    "reset_ledger",
     "propose_session_plan",
     "approve_session_plan",
     "revoke_session_plan"
@@ -445,7 +649,7 @@ dir_graph/
   lib/
     dir_graph/
       graph.ex          — libgraph wrapper; vertices = string IDs, metadata in labels
-      indexer.ex        — Parses source files into the CPG (Elixir AST + JS regex)
+      indexer.ex        — Parses source files into the CPG (Elixir: real AST; all others: LSP)
       analyzer.ex       — find_node, extract_slice (BFS), affected_by, format_for_llm
       server.ex         — GenServer: holds graph, routes all tool calls
       cli.ex            — Escript CLI entry point
@@ -460,11 +664,13 @@ dir_graph/
       attempt_ledger.ex — Tracks repeated LLM mutation attempts to detect flip-flop loops
       process_monitor.ex — Monitors indexer/watcher processes
       lsp/
-        client.ex       — LSP client (go-to-definition, hover) with dead port recovery
-        indexer.ex      — Drives LSP-based deep import extraction
-        import_extractor.ex — Parses LSP responses into graph edges
-        server_registry.ex  — Manages per-language LSP server processes
-        symbol_mapper.ex    — Maps LSP symbols to CPG node types
+        client.ex       — Synchronous LSP client over stdio; open/fetch/close lifecycle;
+                          documentSymbol + callHierarchy/outgoingCalls
+        indexer.ex      — Groups files by language, runs documentSymbol + call hierarchy
+                          pass per file, builds CALLS edges and placeholder Call nodes
+        import_extractor.ex — Narrow regex over raw source for import path strings only
+        server_registry.ex  — ext → {cmd, args} defaults; gap_report/0 for capability checks
+        symbol_mapper.ex    — LSP SymbolKind integers → CPG node types and DEFINES/CONTAINS edges
       mcp/
         server.ex       — stdio JSON-RPC 2.0 loop
         handler.ex      — Tool dispatch, schema definitions, error formatting
@@ -544,17 +750,48 @@ Documentation drifts from code. A `BusinessRule` node attached to a function is 
 
 The CPG lives in a GenServer so multiple MCP tool calls share state without re-parsing. The BEAM scheduler handles concurrent embedding workers naturally. `libgraph` gives BFS/subgraph extraction without an external graph database. And Elixir's pattern matching makes AST traversal concise.
 
-**Why not use the LSP for everything?**
+**Why not use the LSP for Elixir too?**
 
-LSP gives richer type information and go-to-definition across files, but requires a running language server per language, introduces latency, and can crash or hang. The AST-based indexer is the fast, reliable primary path. LSP is an optional enrichment layer for when you need cross-file resolution that regex can't give you.
+Elixir is the host language, so `Code.string_to_quoted/1` is always available, zero-latency, and produces the exact AST node types needed for CALLS edge extraction. For every other language, LSP *is* the primary indexing path — the server starts `typescript-language-server`, `gopls`, etc., requests `textDocument/documentSymbol`, and maps the result to graph nodes. The only thing LSP doesn't give is import paths, which are extracted by a narrow regex pass over the raw source (import path strings only, not code structure).
+
+**Why onion-skin metadata instead of always expanding the slice?**
+
+A deeper BFS includes more nodes, which means more tokens. The onion-skin approach inverts this: instead of expanding the slice to show neighbors, it annotates each node with a summary of its neighborhood so the LLM can reason about what's beyond the slice boundary without actually fetching it. A node that calls `payment_processor` and `audit_log` — even when those functions aren't in the current slice — still tells the LLM those downstream effects exist. The LLM can decide whether to request a wider slice for those specific functions, rather than getting everything speculatively. Token cost stays proportional to what the LLM actually needs.
+
+**Why cap callers at 10?**
+
+Hub nodes — shared utilities, loggers, validators — can be called by hundreds of functions. Emitting the full callers list for a node like `Logger.info` would dominate the payload and provide diminishing signal. The cap keeps the output dense with useful information. The `callers_total` count still tells the LLM how widely used a function is, which is itself meaningful signal (a function called 200 times requires more caution to change than one called twice).
 
 **Weaver's two-phase safety model**
 
 `apply_diff` validates every mutation against the graph before touching the file, then verifies the resulting Elixir source parses cleanly before writing. No mutation reaches disk if the node doesn't exist in the graph or if the resulting file is syntactically invalid. This prevents the common failure mode of an LLM generating a diff that's structurally plausible but references the wrong line offsets.
 
-**The AttemptLedger**
+**The AttemptLedger and diagnostic fingerprinting**
 
-LLMs sometimes flip-flop: "add error handling" → "remove error handling" → "add error handling". The `AttemptLedger` tracks mutation attempts per node per session, detects recurrence patterns, and issues graduated warnings before blocking further mutations on a node that appears stuck in a loop.
+LLMs sometimes flip-flop: "add error handling" → "remove error handling" → "add error handling". The `AttemptLedger` tracks fix attempts per problem key, detects recurrence patterns, and issues graduated warnings as the count rises:
+
+| Attempt | Signal |
+|---|---|
+| 1 | No warning — first try |
+| 2 | Soft note: check whether the approach is sound |
+| 3–4 | Warning: current approach may be stuck, reconsider root cause |
+| 5+ | Hard stop: stop and ask for guidance |
+| Regression | Immediate warning: "previously resolved but recurred — likely flip-flop" |
+| Same diagnostic fingerprint | Pre-empts count: "different code, same failure — mental model likely wrong" |
+
+The fingerprint signal is the most valuable early warning. `record_attempt(key, diagnostic)` hashes the raw diagnostic (test output, stack trace, error message) with `:erlang.phash2/1`. If the fingerprint matches the previous attempt — meaning a code change produced the exact same error — the AttemptLedger fires the "wrong mental model" warning immediately, before the count-based thresholds kick in. Different code producing the same error is strong evidence the root cause analysis is incorrect, not that the fix needs tweaking.
+
+**Surgical Test Selection via `find_tests`**
+
+When a function changes, the safest regression check isn't running the full suite — it's running the tests that actually exercise that function's callers. `find_tests` makes this precise:
+
+1. Run `find_tests("function_name")` to get the inbound call chain (using `affected_by` BFS)
+2. DirGraph filters the chain to nodes located in test/spec directories
+3. Each result includes a ready-to-run command: `mix test file:line`, `npx jest --testPathPattern=...`, `pytest file::name`, etc.
+4. Pass the command to `spawn_process`, then `read_output` to capture results
+5. Feed the test output as the `diagnostic` to `record_attempt` — fingerprinting detects if the same failure recurs
+
+This loop fits comfortably inside 3,000 tokens of LLM context and operates entirely through the MCP tool interface, with no file reads or shell escapes required beyond what DirGraph already manages.
 
 ---
 
@@ -572,11 +809,13 @@ The linear cosine scan (768-dim, pure Elixir) takes ~700 ms regardless of corpus
 
 ### Language coverage
 
-Currently Elixir (full AST) and JS/TS (regex). Missing:
+Currently supported out of the box: Elixir (full AST), JavaScript, TypeScript, JSX, TSX, Python, PHP, Ruby, Go, Rust, C, and C++ (all via LSP). Any language with an LSP server can be added via `.dir_graph/lsp_servers.json` with no code changes.
 
-- **Python**: The regex approach works but misses decorators, type annotations, and comprehension-heavy patterns. A tree-sitter grammar would fix this.
-- **Ruby, Go, Rust**: Adding tree-sitter grammars is straightforward once the JS/TS regex path is treated as a template.
-- **CSS/HTML**: Different node model needed — selectors, component boundaries, not functions.
+Known gaps:
+
+- **CSS/HTML**: Different node model needed — selectors, component boundaries, not functions. A `Selector` node type with `STYLES` edges would require a separate indexer path.
+- **CALLS edges for callers (incoming)**: `callHierarchy/incomingCalls` is not queried at index time because it requires a fully-resolved workspace view that single-file indexing can't reliably provide. Incoming callers are instead derived at query time from the accumulated outgoing CALLS edges across all indexed files — which is accurate once all files are indexed, but incomplete during partial indexing.
+- **Type-level edges**: LSP `textDocument/typeDefinition` and `textDocument/implementation` could add richer type relationship edges for statically-typed languages (e.g. `IMPLEMENTS` edges from concrete types to interfaces in Go or TypeScript).
 
 ### Incremental indexing
 

@@ -50,17 +50,23 @@ defmodule DirGraph.AttemptLedger do
   Record a fix attempt for `key`. Returns a map the agent should read before
   proceeding — it contains the attempt count and any guidance message.
 
+  Pass `diagnostic` (the error message or test failure output) to enable
+  fingerprint tracking. If the same diagnostic fingerprint repeats across
+  consecutive attempts — meaning different code changes produced the same
+  error — the response includes a specific warning that the root cause mental
+  model is likely wrong, before the standard count-based thresholds fire.
+
       %{
         key:         "verify_token",
         attempt:     2,
         recurrences: 0,
         status:      "open",
         first_seen:  "2024-...",
-        message:     "Second attempt. If the current approach isn't working, try a different strategy."
+        message:     "Same error as previous attempt. Different code, same failure ..."
       }
   """
-  def record_attempt(key) do
-    GenServer.call(__MODULE__, {:record_attempt, key})
+  def record_attempt(key, diagnostic \\ nil) do
+    GenServer.call(__MODULE__, {:record_attempt, key, diagnostic})
   end
 
   @doc """
@@ -94,28 +100,37 @@ defmodule DirGraph.AttemptLedger do
   def init(_opts), do: {:ok, %{}}
 
   @impl true
-  def handle_call({:record_attempt, key}, _from, ledger) do
-    now   = DateTime.utc_now()
-    entry = Map.get(ledger, key)
+  def handle_call({:record_attempt, key, diagnostic}, _from, ledger) do
+    now         = DateTime.utc_now()
+    entry       = Map.get(ledger, key)
+    fingerprint = if diagnostic, do: :erlang.phash2(diagnostic), else: nil
 
     {new_entry, response} =
       case entry do
         nil ->
-          e = new_entry(key, now)
+          e = new_entry(key, now, diagnostic, fingerprint)
           {e, build_response(e)}
 
         %{status: :resolved} = e ->
-          # Problem came back after being marked fixed — regression
           e = %{e |
-            status:      :open,
-            attempt:     1,
-            recurrences: e.recurrences + 1,
-            last_seen:   now
+            status:          :open,
+            attempt:         1,
+            recurrences:     e.recurrences + 1,
+            last_seen:       now,
+            last_diagnostic: diagnostic,
+            last_fingerprint: fingerprint
           }
           {e, build_response(e)}
 
         e ->
-          e = %{e | attempt: e.attempt + 1, last_seen: now}
+          same_error = fingerprint != nil and fingerprint == e.last_fingerprint
+          e = %{e |
+            attempt:          e.attempt + 1,
+            last_seen:        now,
+            last_diagnostic:  diagnostic,
+            last_fingerprint: fingerprint,
+            same_error:       same_error
+          }
           {e, build_response(e)}
       end
 
@@ -159,16 +174,31 @@ defmodule DirGraph.AttemptLedger do
   # Private
   # ----------------------------------------------------------------
 
-  defp new_entry(key, now) do
+  defp new_entry(key, now, diagnostic, fingerprint) do
     %{
-      key:         key,
-      attempt:     1,
-      recurrences: 0,
-      status:      :open,
-      first_seen:  now,
-      last_seen:   now,
-      resolved_at: nil
+      key:              key,
+      attempt:          1,
+      recurrences:      0,
+      status:           :open,
+      first_seen:       now,
+      last_seen:        now,
+      resolved_at:      nil,
+      last_diagnostic:  diagnostic,
+      last_fingerprint: fingerprint,
+      same_error:       false
     }
+  end
+
+  defp build_response(%{same_error: true} = entry) do
+    Map.merge(summarise(entry), %{
+      message: """
+      Attempt #{entry.attempt} on '#{entry.key}': the diagnostic fingerprint is \
+      identical to the previous attempt — different code, same failure. \
+      Your mental model of the root cause is likely incorrect. \
+      Before trying again, re-read the affected_by slice for the relevant \
+      function and reconsider what is actually causing this error.
+      """
+    })
   end
 
   defp build_response(%{recurrences: r} = entry) when r > 0 do

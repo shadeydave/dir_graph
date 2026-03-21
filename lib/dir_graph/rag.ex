@@ -36,14 +36,19 @@ defmodule DirGraph.RAG do
 
   use GenServer
 
-  alias DirGraph.{Embeddings, VectorStore}
+  alias DirGraph.{Embeddings, VectorStore, Neo4j}
   alias DirGraph.Graph, as: CG
 
   # ----------------------------------------------------------------
   # Public API
   # ----------------------------------------------------------------
 
-  def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, %{project: nil}, name: __MODULE__)
+
+  @doc "Tell RAG which project is currently active so embeddings are stored in Neo4j."
+  def set_project(project_name) do
+    GenServer.cast(__MODULE__, {:set_project, project_name})
+  end
 
   @doc "Queue nodes for `file_path` in `graph` for background embedding."
   @spec index_file(Graph.t(), String.t()) :: :ok
@@ -98,22 +103,31 @@ defmodule DirGraph.RAG do
   # ----------------------------------------------------------------
 
   @impl true
-  def init(_), do: {:ok, nil}
+  def init(state), do: {:ok, state}
+
+  @impl true
+  def handle_cast({:set_project, project}, state) do
+    {:noreply, %{state | project: project}}
+  end
 
   @impl true
   def handle_cast({:index_node, node_id, text}, state) do
+    project = state.project
     spawn(fn ->
       case Embeddings.embed(text) do
-        {:ok, vector} -> VectorStore.put(node_id, vector)
-        {:error, _}   -> :skip
+        {:ok, vector} ->
+          VectorStore.put(node_id, vector)
+          if project, do: Neo4j.update_embedding(node_id, project, vector)
+        {:error, _} ->
+          :skip
       end
     end)
-
     {:noreply, state}
   end
 
   @impl true
   def handle_cast({:index_file, graph, file_path}, state) do
+    project = state.project
     node_ids =
       Graph.vertices(graph)
       |> Enum.filter(fn vid ->
@@ -124,14 +138,15 @@ defmodule DirGraph.RAG do
         end
       end)
 
-    spawn(fn -> embed_nodes(graph, node_ids) end)
+    spawn(fn -> embed_nodes(graph, node_ids, project) end)
     {:noreply, state}
   end
 
   @impl true
   def handle_cast({:index_graph, graph}, state) do
+    project  = state.project
     node_ids = Graph.vertices(graph)
-    spawn(fn -> embed_nodes(graph, node_ids) end)
+    spawn(fn -> embed_nodes(graph, node_ids, project) end)
     {:noreply, state}
   end
 
@@ -177,13 +192,17 @@ defmodule DirGraph.RAG do
   # Embedding worker (runs in spawned process)
   # ----------------------------------------------------------------
 
-  defp embed_nodes(graph, node_ids) do
+  defp embed_nodes(graph, node_ids, project) do
     Enum.each(node_ids, fn node_id ->
       text = node_text(graph, node_id)
 
       case Embeddings.embed(text) do
-        {:ok, vector} -> VectorStore.put(node_id, vector)
-        {:error, _}   -> :skip
+        {:ok, vector} ->
+          VectorStore.put(node_id, vector)
+          if project, do: Neo4j.update_embedding(node_id, project, vector)
+
+        {:error, _} ->
+          :skip
       end
     end)
   end

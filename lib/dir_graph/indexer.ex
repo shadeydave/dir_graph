@@ -1,4 +1,6 @@
 defmodule DirGraph.Indexer do
+  require Logger
+
   @moduledoc """
   Builds a Code Property Graph (CPG) from source files.
 
@@ -51,7 +53,7 @@ defmodule DirGraph.Indexer do
       ext in @elixir_extensions -> index_elixir_file(file_path, graph)
       ext in @lsp_extensions    -> DirGraph.LSP.Indexer.index_file(file_path, graph)
       true ->
-        IO.puts("Skipping unsupported file: #{file_path}")
+        Logger.warning("Skipping unsupported file type: #{file_path}")
         {graph, []}
     end
   end
@@ -101,7 +103,7 @@ defmodule DirGraph.Indexer do
           {new_graph, acc_refs ++ refs}
         rescue
           e ->
-            IO.puts("Warning: failed to parse #{file_path}: #{Exception.message(e)}")
+            Logger.warning("Failed to parse #{file_path}: #{Exception.message(e)}")
             {acc_graph, acc_refs}
         end
       end)
@@ -210,9 +212,7 @@ defmodule DirGraph.Indexer do
       {:error, {meta, message, token}} ->
         line = Keyword.get(meta, :line, 0)
 
-        IO.puts(
-          "Warning: parse error in #{state.file_path} at line #{line}: #{message}#{token}"
-        )
+        Logger.warning("Parse error in #{state.file_path} at line #{line}: #{message}#{token}")
 
         state
     end

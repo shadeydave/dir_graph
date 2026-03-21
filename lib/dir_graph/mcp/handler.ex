@@ -318,8 +318,18 @@ defmodule DirGraph.MCP.Handler do
     end
   end
 
-  defp call_tool("record_attempt", %{"key" => key}, _allowlist) do
-    DirGraph.AttemptLedger.record_attempt(key)
+  defp call_tool("find_tests", %{"search_term" => term} = args, allowlist) do
+    depth = Map.get(args, "depth", 3)
+    Allowlist.check!(allowlist, "find_tests", nil)
+    case DirGraph.Server.find_tests(term, depth: depth) do
+      {:ok, result}          -> result
+      {:error, :not_found}   -> %{error: "No node matching '#{term}' found in graph."}
+    end
+  end
+
+  defp call_tool("record_attempt", %{"key" => key} = args, _allowlist) do
+    diagnostic = Map.get(args, "diagnostic")
+    DirGraph.AttemptLedger.record_attempt(key, diagnostic)
   end
 
   defp call_tool("resolve_problem", %{"key" => key}, _allowlist) do
@@ -387,6 +397,28 @@ defmodule DirGraph.MCP.Handler do
     }
   end
 
+  defp call_tool("export_to_viewer", %{"project" => project}, _allowlist) do
+    DirGraph.Server.export_viewer_data(project)
+  end
+
+  defp call_tool("neo4j_health", _args, _allowlist) do
+    case DirGraph.Neo4j.health_check() do
+      {:ok, info}      -> Map.put(info, :hint, "Run setup_schema to initialise indexes if this is a fresh container.")
+      {:error, message} -> %{error: true, message: message}
+    end
+  end
+
+  defp call_tool("neo4j_setup_schema", _args, _allowlist) do
+    case DirGraph.Neo4j.ping() do
+      :ok ->
+        DirGraph.Neo4j.setup_schema()
+        %{status: "ok", message: "Schema initialised. Constraints, indexes, and vector index are ready."}
+
+      {:error, :neo4j_unreachable} ->
+        %{error: true, message: DirGraph.Neo4j.not_running_message()}
+    end
+  end
+
   defp call_tool(name, _args, _allowlist) do
     %{error: true, message: "Unknown tool: #{name}"}
   end
@@ -428,6 +460,30 @@ defmodule DirGraph.MCP.Handler do
           search_term:  %{type: "string",  description: "Function, module, or concept name. Supports fuzzy matching."},
           depth:        %{type: "integer", description: "BFS hops from the matched node (1–3). Default 2.", default: 2, minimum: 1, maximum: 3},
           include_code: %{type: "boolean", description: "Embed actual source lines per node. Eliminates separate Read calls for small slices. Default false.", default: false}
+        },
+        required: ["search_term"]
+      }
+    }
+  end
+
+  defp tool_schema("find_tests") do
+    %{
+      name: "find_tests",
+      description: """
+      Find the specific test functions that exercise a given node, using inbound
+      BFS (same as affected_by) filtered to files in test/ or spec/ directories.
+
+      Returns each matching test with its file, line, and a ready-to-run shell
+      command. Use this immediately after an edit to get the minimal, high-certainty
+      test suite for that change — then run each command via spawn_process and
+      monitor with tail_output. Prevents regression blindness: tests for downstream
+      callers are included, not just tests for the function you changed directly.
+      """,
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          search_term: %{type: "string", description: "Function or module you just edited."},
+          depth:       %{type: "integer", description: "BFS hops to search for callers (1–3). Default 3.", default: 3, minimum: 1, maximum: 3}
         },
         required: ["search_term"]
       }
@@ -721,7 +777,14 @@ defmodule DirGraph.MCP.Handler do
       inputSchema: %{
         type: "object",
         properties: %{
-          key: %{type: "string", description: "Free-form identifier for the problem (test name, function name, error description, etc.)"}
+          key: %{
+            type: "string",
+            description: "Free-form identifier for the problem (test name, function name, error description, etc.)"
+          },
+          diagnostic: %{
+            type: "string",
+            description: "The error message or test failure output for this attempt. When provided, the ledger fingerprints it — if the same error repeats on consecutive attempts despite different code changes, a targeted warning fires before the standard count thresholds."
+          }
         },
         required: ["key"]
       }
@@ -837,6 +900,45 @@ defmodule DirGraph.MCP.Handler do
       name: "revoke_session_plan",
       description: "Clear the active session plan and restore the full static allowlist.",
       inputSchema: %{type: "object", properties: %{}}
+    }
+  end
+
+  defp tool_schema("neo4j_health") do
+    %{
+      name: "neo4j_health",
+      description: "Check whether the DirGraph Neo4j container is running and return version info. Run this if any Neo4j-dependent operation fails.",
+      inputSchema: %{type: "object", properties: %{}}
+    }
+  end
+
+  defp tool_schema("neo4j_setup_schema") do
+    %{
+      name: "neo4j_setup_schema",
+      description: "Initialise the DirGraph Neo4j schema: project constraints, AST node/edge indexes, and the vector index for semantic search. Safe to run multiple times (idempotent). Run once after starting a fresh container.",
+      inputSchema: %{type: "object", properties: %{}}
+    }
+  end
+
+  defp tool_schema("export_to_viewer") do
+    %{
+      name: "export_to_viewer",
+      description: """
+      Export the current in-memory graph as JSON for the DirGraph visual viewer and
+      open it in the system browser. Writes full_ast.json and (if absent) an empty
+      diff_ledger.json to ~/sites/diffs/{project}/. Run index_directory first.
+      Opens http://localhost:5173/?project={project} — start the viewer with:
+        cd viewer && npm run dev
+      """,
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          project: %{
+            type: "string",
+            description: "Project slug used as the directory name under ~/sites/diffs/ (e.g. \"dir_graph\")."
+          }
+        },
+        required: ["project"]
+      }
     }
   end
 
