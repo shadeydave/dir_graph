@@ -397,6 +397,100 @@ defmodule DirGraph.MCP.Handler do
     }
   end
 
+  defp call_tool("cross_project_search", args, _allowlist) do
+    query   = Map.get(args, "query", "")
+    top_k   = Map.get(args, "top_k", 10)
+    project = Map.get(args, "project")
+
+    case DirGraph.Neo4j.ping() do
+      {:error, :neo4j_unreachable} ->
+        %{error: true, message: DirGraph.Neo4j.not_running_message()}
+
+      :ok ->
+        case DirGraph.Embeddings.embed(query) do
+          {:ok, vector} ->
+            opts = [top_k: top_k] ++ if(project, do: [project: project], else: [])
+
+            case DirGraph.Neo4j.semantic_search(vector, opts) do
+              {:ok, []} ->
+                %{results: [], message: "No matching nodes found. Embeddings may not be fully built yet — wait for background indexing or check that an embedding backend is running."}
+
+              {:ok, hits} ->
+                %{query: query, total: length(hits), results: hits}
+
+              {:error, reason} ->
+                %{error: true, message: "Search failed: #{inspect(reason)}"}
+            end
+
+          {:error, reason} ->
+            %{
+              error: true,
+              message: "Embedding backend unavailable: #{inspect(reason)}",
+              hint: "For Ollama: run `ollama serve` and `ollama pull nomic-embed-text`."
+            }
+        end
+    end
+  end
+
+  defp call_tool("submit_viewer_diff", args, _allowlist) do
+    project       = Map.get(args, "project", "")
+    label         = Map.get(args, "label", "AI diff")
+    added_nodes   = Map.get(args, "added_nodes", [])
+    removed_nodes = Map.get(args, "removed_nodes", [])
+    added_edges   = Map.get(args, "added_edges", [])
+    removed_edges = Map.get(args, "removed_edges", [])
+    annotations   = Map.get(args, "annotations", [])
+
+    ledger_path = Path.expand("~/sites/diffs/#{project}/diff_ledger.json")
+
+    with {:ok, raw}    <- File.read(ledger_path),
+         {:ok, ledger} <- Jason.decode(raw) do
+      diffs     = ledger["diffs"] || []
+      last_id   = diffs |> List.last() |> then(&((&1 && &1["diff_id"]) || 0))
+      new_id    = last_id + 1
+
+      diff = %{
+        "diff_id"        => new_id,
+        "parent_diff_id" => last_id,
+        "author"         => "ai",
+        "label"          => label,
+        "added_nodes"    => added_nodes,
+        "removed_nodes"  => removed_nodes,
+        "added_edges"    => added_edges,
+        "removed_edges"  => removed_edges,
+        "annotations"    => annotations,
+        "timestamp"      => DateTime.utc_now() |> DateTime.to_iso8601()
+      }
+
+      new_ledger = Map.put(ledger, "diffs", diffs ++ [diff])
+
+      case File.write(ledger_path, Jason.encode!(new_ledger, pretty: true)) do
+        :ok ->
+          %{
+            status: "ok",
+            diff_id: new_id,
+            message: "Diff ##{new_id} submitted to '#{project}' ledger. The viewer will display it within 2 seconds.",
+            summary: %{
+              added_nodes:   length(added_nodes),
+              removed_nodes: length(removed_nodes),
+              added_edges:   length(added_edges),
+              removed_edges: length(removed_edges),
+              annotations:   length(annotations)
+            }
+          }
+
+        {:error, reason} ->
+          %{error: true, message: "Failed to write ledger: #{:file.format_error(reason)}"}
+      end
+    else
+      {:error, :enoent} ->
+        %{error: true, message: "No ledger found for project '#{project}'. Run export_to_viewer first to initialise the viewer session."}
+
+      {:error, reason} ->
+        %{error: true, message: "Failed to read ledger: #{inspect(reason)}"}
+    end
+  end
+
   defp call_tool("export_to_viewer", %{"project" => project}, _allowlist) do
     DirGraph.Server.export_viewer_data(project)
   end
@@ -900,6 +994,71 @@ defmodule DirGraph.MCP.Handler do
       name: "revoke_session_plan",
       description: "Clear the active session plan and restore the full static allowlist.",
       inputSchema: %{type: "object", properties: %{}}
+    }
+  end
+
+  defp tool_schema("cross_project_search") do
+    %{
+      name: "cross_project_search",
+      description: """
+      Semantic search across ALL indexed projects stored in Neo4j.
+      Embeds the query and finds the most similar nodes by vector similarity,
+      regardless of which project they belong to. Each result includes the
+      project name, node type/name, file path, line number, and similarity score.
+
+      Use this to find prior solutions: "how did I handle authentication in other projects?",
+      "where have I used rate limiting before?", "find similar payment processing logic".
+
+      Requires Neo4j to be running and nodes to have stored embeddings (built during
+      index_directory with an embedding backend active).
+      """,
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          query:   %{type: "string",  description: "Natural language description of what you're looking for."},
+          top_k:   %{type: "integer", description: "Number of results to return (default 10).", default: 10, minimum: 1, maximum: 50},
+          project: %{type: "string",  description: "Restrict search to a single project slug. Omit to search all projects."}
+        },
+        required: ["query"]
+      }
+    }
+  end
+
+  defp tool_schema("submit_viewer_diff") do
+    %{
+      name: "submit_viewer_diff",
+      description: """
+      Append an AI-authored diff to the DirGraph viewer's diff ledger.
+      The viewer polls every 2 seconds — your diff will appear automatically
+      with a notification badge. Use this to propose architectural changes,
+      add annotation commentary, or respond to user-submitted graph edits.
+
+      Workflow:
+      1. User submits a diff via the viewer canvas
+      2. You read the current graph state and the user's intent
+      3. Call this tool with your proposed additions/removals/annotations
+      4. User sees your diff in the viewer and can accept or counter-propose
+
+      Node shape: {id, type, name, file?, line?}
+      Edge shape: {source, target, label}
+      Annotation shape: {id, body, target_node_id?}
+
+      After this, a "Publish Changes" button appears in the viewer, signalling
+      the session is ready for code generation.
+      """,
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          project:       %{type: "string", description: "Project slug (matches the directory under ~/sites/diffs/)."},
+          label:         %{type: "string", description: "Short human-readable description of this diff (e.g. \"Extract auth middleware\")."},
+          added_nodes:   %{type: "array",  items: %{type: "object"}, description: "New nodes to add. Each must have at minimum {id, type, name}.", default: []},
+          removed_nodes: %{type: "array",  items: %{type: "string"}, description: "Node IDs to remove.", default: []},
+          added_edges:   %{type: "array",  items: %{type: "object"}, description: "New edges to add. Each must have {source, target, label}.", default: []},
+          removed_edges: %{type: "array",  items: %{type: "object"}, description: "Edges to remove. Each must have {source, target, label}.", default: []},
+          annotations:   %{type: "array",  items: %{type: "object"}, description: "Commentary nodes. Each must have {id, body} and optionally {target_node_id}.", default: []}
+        },
+        required: ["project", "label"]
+      }
     }
   end
 

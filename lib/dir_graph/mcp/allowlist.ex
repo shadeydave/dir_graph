@@ -32,6 +32,7 @@ defmodule DirGraph.MCP.Allowlist do
     find_tests
     workspace_stats
     semantic_search
+    cross_project_search
     add_content_node
     update_content_node
     delete_content_node
@@ -53,6 +54,10 @@ defmodule DirGraph.MCP.Allowlist do
     resolve_problem
     list_problems
     reset_ledger
+    export_to_viewer
+    submit_viewer_diff
+    neo4j_health
+    neo4j_setup_schema
   )
 
   @meta_tools ~w(

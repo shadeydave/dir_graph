@@ -200,9 +200,15 @@ defmodule DirGraph.Server do
     # have been added since, or was built without them.
     graph = reload_content_nodes(graph)
 
+    # Derive project name from the .bin filename (e.g. "dir_graph.bin" → "dir_graph").
+    project = bin_path |> Path.basename() |> Path.rootname()
+    RAG.set_project(project)
     RAG.index_graph(graph)
 
-    {:reply, :ok, %{state | graph: graph, manifest: manifest}}
+    # Background: sync the loaded graph to Neo4j for cross-project persistence.
+    Task.start(fn -> DirGraph.Neo4j.persist_graph(project, graph) end)
+
+    {:reply, :ok, %{state | graph: graph, manifest: manifest, project_name: project}}
   end
 
   @impl true

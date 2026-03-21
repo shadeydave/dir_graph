@@ -3,11 +3,16 @@
 
   "allowed_tools": [
     "query_code_graph",
+    "affected_by",
+    "semantic_search",
+    "cross_project_search",
+    "workspace_stats",
     "load_graph",
     "index_file",
     "index_directory",
     "save_graph",
     "export_to_viewer",
+    "submit_viewer_diff",
     "neo4j_health",
     "neo4j_setup_schema",
     "propose_session_plan",
