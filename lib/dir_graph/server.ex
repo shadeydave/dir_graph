@@ -176,6 +176,9 @@ defmodule DirGraph.Server do
     # Background: embed newly indexed nodes for semantic search.
     RAG.index_file(resolved, file_path)
 
+    # Background: enqueue newly indexed nodes for LLM enrichment (Dream pass).
+    DirGraph.Dream.enqueue_file(resolved, file_path)
+
     # Background: persist new/updated nodes + their edges to Neo4j.
     if state.project_name do
       project = state.project_name
@@ -196,6 +199,9 @@ defmodule DirGraph.Server do
     project  = Path.basename(Path.expand(dir_path))
     RAG.set_project(project)
     RAG.index_graph(graph)
+
+    # Background: enqueue all nodes for LLM enrichment (Dream pass).
+    DirGraph.Dream.enqueue_graph(graph)
 
     # Background: full graph sync to Neo4j.
     Task.start(fn -> DirGraph.Neo4j.persist_graph(project, graph) end)

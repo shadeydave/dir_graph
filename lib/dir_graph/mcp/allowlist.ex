@@ -59,6 +59,8 @@ defmodule DirGraph.MCP.Allowlist do
     neo4j_health
     neo4j_setup_schema
     apply_diff
+    dream_status
+    dream_enrich
   )
 
   @meta_tools ~w(

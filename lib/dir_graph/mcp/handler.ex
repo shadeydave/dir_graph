@@ -126,6 +126,20 @@ defmodule DirGraph.MCP.Handler do
     end
   end
 
+  defp call_tool("dream_status", _args, _allowlist) do
+    DirGraph.Dream.status()
+  end
+
+  defp call_tool("dream_enrich", args, _allowlist) do
+    node_id = Map.get(args, "node_id", "")
+    graph   = DirGraph.Server.get_graph()
+
+    case DirGraph.Dream.enrich_now(node_id, graph) do
+      {:ok, enrichment} -> Map.put(enrichment, "node_id", node_id)
+      {:error, reason}  -> %{error: true, message: inspect(reason)}
+    end
+  end
+
   defp call_tool("apply_diff", args, _allowlist) do
     file_path    = Map.get(args, "file_path", "")
     mutations    = Map.get(args, "mutations", [])
@@ -1119,6 +1133,32 @@ defmodule DirGraph.MCP.Handler do
           }
         },
         required: ["project"]
+      }
+    }
+  end
+
+  defp tool_schema("dream_status") do
+    %{
+      name: "dream_status",
+      description: "Check the status of the background Dream enrichment pass: queue depth, enriched node count, errors, and whether it is paused.",
+      inputSchema: %{type: "object", properties: %{}}
+    }
+  end
+
+  defp tool_schema("dream_enrich") do
+    %{
+      name: "dream_enrich",
+      description: """
+      Force-enrich a specific node immediately using the local LLM, bypassing the background queue.
+      Returns the enrichment: summary, domain, tags, complexity. Useful before a deep semantic search
+      or when you need to understand a specific node right now rather than waiting for the Dream pass.
+      """,
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          node_id: %{type: "string", description: "Graph node ID to enrich (e.g. from a query_code_graph result)."}
+        },
+        required: ["node_id"]
       }
     }
   end

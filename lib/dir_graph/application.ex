@@ -11,7 +11,9 @@ defmodule DirGraph.Application do
       DirGraph.ProcessMonitor,
       DirGraph.AttemptLedger,
       DirGraph.VectorStore,
-      DirGraph.RAG
+      DirGraph.RAG,
+      DirGraph.EnrichmentStore,
+      DirGraph.Dream
     ]
 
     opts = [strategy: :one_for_one, name: DirGraph.Supervisor]

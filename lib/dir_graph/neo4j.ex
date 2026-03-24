@@ -238,6 +238,33 @@ defmodule DirGraph.Neo4j do
     end
   end
 
+  @doc """
+  Store LLM-generated enrichment fields on an ASTNode.
+  Writes summary, domain, tags, complexity, and enriched_at. No-op if Neo4j is not running.
+  """
+  def update_enrichment(node_id, enrichment) do
+    cypher = """
+    MATCH (n:ASTNode {node_id: $node_id})
+    SET n.summary     = $summary,
+        n.domain      = $domain,
+        n.tags        = $tags,
+        n.complexity  = $complexity,
+        n.enriched_at = $enriched_at
+    """
+    params = %{
+      node_id:     node_id,
+      summary:     Map.get(enrichment, "summary", ""),
+      domain:      Map.get(enrichment, "domain", ""),
+      tags:        Map.get(enrichment, "tags", []),
+      complexity:  Map.get(enrichment, "complexity", ""),
+      enriched_at: Map.get(enrichment, "enriched_at", "")
+    }
+    case query(cypher, params) do
+      {:ok, _} -> :ok
+      _ -> :ok   # Neo4j optional — silently skip if not running
+    end
+  end
+
   @doc "Remove all ASTNodes (and their relationships) belonging to `file_path` in `project`."
   def purge_file_nodes(project, file_path) do
     cypher = """
