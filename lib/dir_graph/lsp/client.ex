@@ -45,7 +45,7 @@ defmodule DirGraph.LSP.Client do
         case initialize(client, root_path) do
           {:ok, client} -> {:ok, client}
           {:error, reason} ->
-            Port.close(port)
+            if Port.info(port) != nil, do: Port.close(port)
             {:error, reason}
         end
     end
@@ -172,7 +172,7 @@ defmodule DirGraph.LSP.Client do
     try do
       {client, id} = alloc_id(client)
       client = send_request(client, id, "shutdown", %{})
-      {_result, client} = await_id(client, id)
+      {:ok, _result, client} = await_id(client, id)
       send_notification(client, "exit", %{})
     after
       Port.close(port)

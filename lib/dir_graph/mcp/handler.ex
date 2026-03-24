@@ -104,8 +104,12 @@ defmodule DirGraph.MCP.Handler do
     term         = Map.get(args, "search_term", "")
     depth        = args |> Map.get("depth", 2) |> min(allowlist.max_search_depth)
     include_code = Map.get(args, "include_code", false)
+    node_type    = Map.get(args, "node_type", nil)
 
-    case DirGraph.Server.extract_slice(term, depth: depth, include_code: include_code) do
+    opts = [depth: depth, include_code: include_code]
+    opts = if node_type, do: Keyword.put(opts, :node_type, node_type), else: opts
+
+    case DirGraph.Server.extract_slice(term, opts) do
       {:ok, payload} -> payload
       {:error, :not_found} -> %{error: true, message: "No node found matching '#{term}'"}
     end
@@ -119,6 +123,23 @@ defmodule DirGraph.MCP.Handler do
     case DirGraph.Server.affected_by(term, depth: depth, include_code: include_code) do
       {:ok, payload} -> payload
       {:error, :not_found} -> %{error: true, message: "No node found matching '#{term}'"}
+    end
+  end
+
+  defp call_tool("apply_diff", args, _allowlist) do
+    file_path    = Map.get(args, "file_path", "")
+    mutations    = Map.get(args, "mutations", [])
+    diff_payload = %{"mutations" => mutations}
+
+    case DirGraph.Server.apply_diff(file_path, diff_payload) do
+      {:ok, _new_source} ->
+        %{status: "ok", message: "#{length(mutations)} mutation(s) applied and graph re-indexed.", file: file_path}
+
+      {:error, {:syntax_error, reason, _src}} ->
+        %{error: true, message: "Syntax error — file not written: #{reason}"}
+
+      {:error, reason} ->
+        %{error: true, message: inspect(reason)}
     end
   end
 
@@ -553,7 +574,8 @@ defmodule DirGraph.MCP.Handler do
         properties: %{
           search_term:  %{type: "string",  description: "Function, module, or concept name. Supports fuzzy matching."},
           depth:        %{type: "integer", description: "BFS hops from the matched node (1–3). Default 2.", default: 2, minimum: 1, maximum: 3},
-          include_code: %{type: "boolean", description: "Embed actual source lines per node. Eliminates separate Read calls for small slices. Default false.", default: false}
+          include_code: %{type: "boolean", description: "Embed actual source lines per node. Eliminates separate Read calls for small slices. Default false.", default: false},
+          node_type:    %{type: "string",  description: "Filter results to a single node type. One of: Function, Module, File, Call, Class, Interface, Variable, BusinessRule, Copy, Contract, Domain. Omit to return all types.", enum: ["Function", "Module", "File", "Call", "Class", "Interface", "Variable", "BusinessRule", "Copy", "Contract", "Domain"]}
         },
         required: ["search_term"]
       }
@@ -1097,6 +1119,46 @@ defmodule DirGraph.MCP.Handler do
           }
         },
         required: ["project"]
+      }
+    }
+  end
+
+  defp tool_schema("apply_diff") do
+    %{
+      name: "apply_diff",
+      description: """
+      Surgically mutate source files using graph node IDs as anchors.
+      Each mutation targets a node by its ID (e.g. "Function:login/2:L45:lib/auth.ex"),
+      looks up its line number from the graph, and applies the action at that exact position.
+      Elixir files are syntax-checked before writing — the file is never touched if the
+      result would be invalid. The in-memory graph is re-indexed automatically after a
+      successful write.
+
+      Actions:
+        replace       — swap the single line a node occupies, preserving indentation
+        replace_node  — replace the full line range (line–end_line) of a node
+        delete        — remove the line the node occupies
+        insert_after  — insert a new line immediately after the node's line
+      """,
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          file_path: %{type: "string", description: "Absolute path to the source file to mutate."},
+          mutations: %{
+            type: "array",
+            description: "Ordered list of mutations to apply (applied in reverse-line order internally).",
+            items: %{
+              type: "object",
+              properties: %{
+                node_id:  %{type: "string",  description: "Graph node ID to target (e.g. \"Function:login/2:L45:lib/auth.ex\")."},
+                action:   %{type: "string",  enum: ["replace", "replace_node", "delete", "insert_after"]},
+                new_code: %{type: "string",  description: "Replacement or inserted code (omit for delete). Do not include leading indentation — it is inherited from the target line."}
+              },
+              required: ["node_id", "action"]
+            }
+          }
+        },
+        required: ["file_path", "mutations"]
       }
     }
   end

@@ -99,6 +99,23 @@ body {
 .canvas-wrap {
   flex: 1;
   min-height: 0;
+  position: relative;
+}
+
+.canvas-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  background: rgba(13, 17, 23, 0.85);
+  color: #8b949e;
+  font-family: 'Fira Code', monospace;
+  font-size: 13px;
+  padding: 10px 18px;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  pointer-events: none;
 }
 
 /* ── toolbar ─────────────────────────────────────────────────────────────── */
@@ -281,4 +298,83 @@ body {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* ── legend ──────────────────────────────────────────────────────────────── */
+
+.legend {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 5;
+  background: rgba(13, 17, 23, 0.92);
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+  backdrop-filter: blur(6px);
+}
+
+.legend-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #484f58;
+  margin-bottom: 4px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 3px 0;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: opacity 0.15s;
+  width: 100%;
+  text-align: left;
+}
+
+.legend-item:hover { opacity: 0.8; }
+.legend-item--off   { opacity: 0.35; }
+
+.legend-line {
+  display: block;
+  width: 28px;
+  flex-shrink: 0;
+  border-radius: 2px;
+  transition: background 0.2s;
+}
+
+.legend-rel {
+  font-family: 'Fira Code', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  flex: 1;
+  transition: color 0.2s;
+}
+
+.legend-flow {
+  font-size: 11px;
+  color: #484f58;
+  font-family: 'Fira Code', monospace;
+}
+
+/* ── lod badge ───────────────────────────────────────────────────────────── */
+
+.lod-badge {
+  font-size: 11px;
+  font-family: 'Fira Code', monospace;
+  color: #484f58;
+  padding: 3px 8px;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  white-space: nowrap;
 }

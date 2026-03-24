@@ -23,6 +23,9 @@ function json(res: ServerResponse, status: number, data: unknown) {
 }
 
 export default defineConfig({
+  server: {
+    hmr: false,
+  },
   plugins: [
     react(),
     {

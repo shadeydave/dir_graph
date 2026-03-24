@@ -1,15 +1,20 @@
 import dagre from 'dagre';
 import type { Node, Edge } from '@xyflow/react';
 
-const nodeWidth = 260;
-const nodeHeight = 120;
+const nodeWidth  = 260;
+const nodeHeight = 80;
 
-// Creates a fresh dagre graph each call — avoids stale node accumulation
-// across re-layouts when the graph topology changes (diff navigation, submit).
 export const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
-  dagreGraph.setGraph({ rankdir: direction });
+  dagreGraph.setGraph({
+    rankdir:  direction,
+    ranksep:  120,   // vertical gap between ranks (was default ~50)
+    nodesep:  60,    // horizontal gap between nodes in the same rank
+    edgesep:  20,
+    marginx:  40,
+    marginy:  40,
+  });
 
   nodes.forEach(node => {
     dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });

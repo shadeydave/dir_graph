@@ -107,13 +107,17 @@ defmodule DirGraph.Embeddings do
     {:error, "Unknown embedding backend '#{backend}'. Supported: ollama, openai"}
   end
 
-  # Quick reachability probe — does not embed real text.
+  # Quick reachability probe — verifies Ollama is up AND the configured model is pulled.
   defp probe("ollama", config) do
-    url = Map.get(config, "url", "http://localhost:11434")
+    url   = Map.get(config, "url", "http://localhost:11434")
+    model = Map.get(config, "model", "nomic-embed-text")
 
     case Req.get("#{url}/api/tags") do
-      {:ok, %{status: 200}} -> true
-      _ -> false
+      {:ok, %{status: 200, body: %{"models" => models}}} ->
+        Enum.any?(models, fn m -> Map.get(m, "name") == model end)
+
+      _ ->
+        false
     end
   end
 

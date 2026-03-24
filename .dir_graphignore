@@ -1,0 +1,3 @@
+# Directories to exclude from DirGraph indexing
+tmp/
+dist/

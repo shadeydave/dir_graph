@@ -58,6 +58,7 @@ defmodule DirGraph.MCP.Allowlist do
     submit_viewer_diff
     neo4j_health
     neo4j_setup_schema
+    apply_diff
   )
 
   @meta_tools ~w(

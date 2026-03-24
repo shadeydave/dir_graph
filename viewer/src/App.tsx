@@ -12,6 +12,7 @@ import {
   type Node as FlowNode,
   type NodeChange,
   type EdgeChange,
+  type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import './index.css';
@@ -20,50 +21,55 @@ import { getLayoutedElements } from './utils/layout';
 import GraphNode from './components/GraphNode';
 import type { ASTData, ASTNode, ASTEdge, Diff, DiffLedger } from './types';
 
-// ─── constants ───────────────────────────────────────────────────────────────
+// ─── edge type visual system ──────────────────────────────────────────────────
 
-const EDGE_DEFAULTS = {
-  animated: true,
-  style: { stroke: '#58a6ff', strokeWidth: 2 },
-  labelStyle: { fill: '#8b949e', fontWeight: 600, fontSize: 12, fontFamily: 'Fira Code' },
-  labelBgStyle: { fill: '#0d1117' },
-  labelBgBorderRadius: 4,
-  markerEnd: { type: MarkerType.ArrowClosed, color: '#58a6ff' },
+type EdgeStyle = { color: string; weight: number; animated: boolean; dash?: string };
+
+const EDGE_STYLES: Record<string, EdgeStyle> = {
+  CONTAINS:   { color: '#6e7681', weight: 1,   animated: false },
+  DEFINES:    { color: '#58a6ff', weight: 2,   animated: false },
+  CALLS:      { color: '#3fb950', weight: 2,   animated: true  },
+  IMPORTS:    { color: '#e3b341', weight: 1.5, animated: true  },
+  USES:       { color: '#bc8cff', weight: 1.5, animated: false },
+  REQUIRES:   { color: '#f85149', weight: 2,   animated: true  },
+  IMPLEMENTS: { color: '#39d353', weight: 1.5, animated: false, dash: '6 3' },
 };
+const FALLBACK_EDGE: EdgeStyle = { color: '#8b949e', weight: 1, animated: false };
+
+// ─── LOD zoom thresholds ──────────────────────────────────────────────────────
+
+const LOD: Array<{ minZoom: number; types: Set<string> }> = [
+  { minZoom: 0,    types: new Set(['File']) },
+  { minZoom: 0.15, types: new Set(['File', 'Module']) },
+  { minZoom: 0.35, types: new Set(['File', 'Module', 'Class', 'BusinessRule', 'Copy', 'Contract', 'Domain']) },
+];
+
+function lodTypesForZoom(zoom: number): Set<string> {
+  let result = LOD[0].types;
+  for (const level of LOD) { if (zoom >= level.minZoom) result = level.types; }
+  return result;
+}
 
 const nodeTypes = { custom: GraphNode };
 
 // ─── diff helpers ─────────────────────────────────────────────────────────────
 
-function edgeKey(e: ASTEdge): string {
-  return `${e.source}→${e.target}:${e.rel}`;
-}
+function edgeKey(e: ASTEdge): string { return `${e.source}→${e.target}:${e.rel}`; }
 
-function applyDiffs(
-  base: ASTData,
-  diffs: Diff[],
-  upToDiffId: number | null,
-): { nodes: ASTNode[]; edges: ASTEdge[] } {
+function applyDiffs(base: ASTData, diffs: Diff[], upToDiffId: number | null) {
   let nodes = [...base.nodes];
   let edges = [...base.edges];
   const toApply = upToDiffId === null ? diffs : diffs.filter(d => d.diff_id <= upToDiffId);
-
   for (const diff of toApply) {
     const removedNodeSet = new Set(diff.removed_nodes);
     nodes = nodes.filter(n => !removedNodeSet.has(n.id)).concat(diff.added_nodes);
-
     const removedEdgeSet = new Set(diff.removed_edges.map(edgeKey));
     edges = edges.filter(e => !removedEdgeSet.has(edgeKey(e))).concat(diff.added_edges);
   }
-
   return { nodes, edges };
 }
 
-// Computes which node IDs were added/removed between two diff states.
-function diffOverlay(
-  prev: { nodes: ASTNode[] },
-  curr: { nodes: ASTNode[] },
-): Map<string, 'added' | 'removed'> {
+function diffOverlay(prev: { nodes: ASTNode[] }, curr: { nodes: ASTNode[] }) {
   const overlay = new Map<string, 'added' | 'removed'>();
   const prevIds = new Set(prev.nodes.map(n => n.id));
   const currIds = new Set(curr.nodes.map(n => n.id));
@@ -73,80 +79,135 @@ function diffOverlay(
 }
 
 // ─── XYFlow conversion ────────────────────────────────────────────────────────
+// These run ONCE per topology change (Dagre). Visibility is handled separately.
 
-function toFlowNodes(
-  nodes: ASTNode[],
-  overlay?: Map<string, 'added' | 'removed'>,
-): FlowNode[] {
+function toFlowNodes(nodes: ASTNode[], overlay?: Map<string, 'added' | 'removed'>): FlowNode[] {
   return nodes.map(n => ({
     id: n.id,
     type: 'custom',
     data: { ...n, diffStatus: overlay?.get(n.id) },
     position: { x: 0, y: 0 },
+    hidden: false,
   }));
 }
 
 function toFlowEdges(edges: ASTEdge[]): FlowEdge[] {
-  return edges.map((e, i) => ({
-    id: `e${i}-${e.source}-${e.target}-${e.rel}`,
-    source: e.source,
-    target: e.target,
-    label: e.rel,
-    ...EDGE_DEFAULTS,
-  }));
+  return edges.map((e, i) => {
+    const s = EDGE_STYLES[e.rel] ?? FALLBACK_EDGE;
+    return {
+      id: `e${i}-${e.source}-${e.target}-${e.rel}`,
+      source: e.source,
+      target: e.target,
+      label: e.rel,
+      animated: s.animated,
+      hidden: false,
+      style: { stroke: s.color, strokeWidth: s.weight, strokeDasharray: s.dash },
+      labelStyle: { fill: s.color, fontWeight: 600, fontSize: 11, fontFamily: 'Fira Code' },
+      labelBgStyle: { fill: '#0d1117' },
+      labelBgBorderRadius: 4,
+      markerEnd: { type: MarkerType.ArrowClosed, color: s.color },
+    };
+  });
 }
 
-function layoutGraph(nodes: ASTNode[], edges: ASTEdge[], overlay?: Map<string, 'added' | 'removed'>) {
-  const { nodes: ln, edges: le } = getLayoutedElements(
-    toFlowNodes(nodes, overlay),
-    toFlowEdges(edges),
-  );
+function runLayout(nodes: ASTNode[], edges: ASTEdge[], overlay?: Map<string, 'added' | 'removed'>) {
+  const fn = toFlowNodes(nodes, overlay);
+  const fe = toFlowEdges(edges);
+  const { nodes: ln, edges: le } = getLayoutedElements(fn, fe);
   return { flowNodes: ln, flowEdges: le };
 }
 
-// ─── component ───────────────────────────────────────────────────────────────
+// ─── component ────────────────────────────────────────────────────────────────
 
 export default function App() {
   const initialProject = new URLSearchParams(window.location.search).get('project') ?? '';
 
-  const [projects, setProjects]       = useState<string[]>([]);
-  const [project,  setProject]        = useState(initialProject);
-  const [baseAST,  setBaseAST]        = useState<ASTData | null>(null);
-  const [ledger,   setLedger]         = useState<DiffLedger | null>(null);
-  const [viewDiffId, setViewDiffId]   = useState<number | null>(null); // null = latest
-  const [hasNewAIDiff, setHasNewAIDiff] = useState(false);
+  const [projects,        setProjects]        = useState<string[]>([]);
+  const [project,         setProject]         = useState(initialProject);
+  const [baseAST,         setBaseAST]         = useState<ASTData | null>(null);
+  const [ledger,          setLedger]          = useState<DiffLedger | null>(null);
+  const [viewDiffId,      setViewDiffId]      = useState<number | null>(null);
+  const [hasNewAIDiff,    setHasNewAIDiff]    = useState(false);
+  const [loading,         setLoading]         = useState(false);
+  const [hiddenEdgeTypes, setHiddenEdgeTypes] = useState<Set<string>>(new Set());
+  const [zoom,            setZoom]            = useState(0);
 
-  // Add-node modal state
-  const [showAddNode,  setShowAddNode]  = useState(false);
-  const [newNodeType,  setNewNodeType]  = useState('Function');
-  const [newNodeName,  setNewNodeName]  = useState('');
+  const [showAddNode, setShowAddNode] = useState(false);
+  const [newNodeType, setNewNodeType] = useState('Module');
+  const [newNodeName, setNewNodeName] = useState('');
 
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
 
-  // Tracks the last-committed graph state so submit can compute a clean diff.
   const committedRef   = useRef<{ nodes: ASTNode[]; edges: ASTEdge[] }>({ nodes: [], edges: [] });
-  // Tracks whether the canvas has uncommitted user changes.
   const isDirtyRef     = useRef(false);
   const lastDiffCount  = useRef(0);
+  const lodLevelRef    = useRef<Set<string>>(LOD[0].types);
+  const hiddenTypesRef = useRef<Set<string>>(new Set());
+  const layoutGenRef   = useRef(0);
+
+  // The full positioned graph — set once per topology change, never re-layouted.
+  const allNodesRef = useRef<FlowNode[]>([]);
+  const allEdgesRef = useRef<FlowEdge[]>([]);
 
   const isHistoryMode = viewDiffId !== null;
   const showPublish   = ledger !== null && ledger.diffs.some(d => d.author === 'ai');
 
+  // ── applyVisibility ───────────────────────────────────────────────────────
+  // O(n) pass over already-positioned nodes. No Dagre. Called on LOD/toggle changes.
+  const applyVisibility = useCallback(() => {
+    const lod    = lodLevelRef.current;
+    const hidden = hiddenTypesRef.current;
+
+    const visNodes = allNodesRef.current.map(n => ({
+      ...n,
+      hidden: !lod.has((n.data as unknown as ASTNode).type),
+    }));
+
+    const visIds = new Set(visNodes.filter(n => !n.hidden).map(n => n.id));
+
+    const visEdges = allEdgesRef.current.map(e => ({
+      ...e,
+      hidden: hidden.has(e.label as string) || !visIds.has(e.source) || !visIds.has(e.target),
+    }));
+
+    setNodes(visNodes);
+    setEdges(visEdges);
+  }, [setNodes, setEdges]);
+
+  // ── applyLayout (Dagre) ───────────────────────────────────────────────────
+  // Runs Dagre on the full topology, stores results in refs, then calls
+  // applyVisibility. Only called when topology changes — NOT on LOD/toggle.
+  const applyLayout = useCallback((
+    astNodes: ASTNode[],
+    astEdges: ASTEdge[],
+    overlay?: Map<string, 'added' | 'removed'>,
+  ) => {
+    const gen = ++layoutGenRef.current;
+    setLoading(true);
+    setTimeout(() => {
+      if (gen !== layoutGenRef.current) return; // superseded
+      const { flowNodes, flowEdges } = runLayout(astNodes, astEdges, overlay);
+      allNodesRef.current = flowNodes;
+      allEdgesRef.current = flowEdges;
+      applyVisibility();
+      setLoading(false);
+    }, 0);
+  }, [applyVisibility]);
+
   // ── fetch project list ────────────────────────────────────────────────────
   useEffect(() => {
-    fetch('/api/projects')
-      .then(r => r.json())
-      .then(setProjects)
-      .catch(() => {});
+    fetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => {});
   }, []);
 
-  // ── load AST + ledger when project changes ────────────────────────────────
+  // ── load AST + ledger on project change ───────────────────────────────────
   useEffect(() => {
     if (!project) return;
     isDirtyRef.current = false;
     setViewDiffId(null);
     setHasNewAIDiff(false);
+    lodLevelRef.current = LOD[0].types;
+    setZoom(0);
 
     Promise.all([
       fetch(`/api/diffs/${project}/ast`).then(r => r.json()),
@@ -156,87 +217,81 @@ export default function App() {
         setBaseAST(ast);
         setLedger(ldgr);
         lastDiffCount.current = ldgr.diffs.length;
-
         const committed = applyDiffs(ast, ldgr.diffs, null);
         committedRef.current = committed;
-
-        const { flowNodes, flowEdges } = layoutGraph(committed.nodes, committed.edges);
-        setNodes(flowNodes);
-        setEdges(flowEdges);
+        applyLayout(committed.nodes, committed.edges);
       })
       .catch(() => {});
   }, [project]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── LOD on zoom — NO Dagre ────────────────────────────────────────────────
+  const handleMoveEnd = useCallback((_: MouseEvent | TouchEvent | null, viewport: Viewport) => {
+    setZoom(viewport.zoom);
+    const newLod = lodTypesForZoom(viewport.zoom);
+    if (newLod === lodLevelRef.current) return;
+    lodLevelRef.current = newLod;
+    if (!isDirtyRef.current && !isHistoryMode) applyVisibility();
+  }, [isHistoryMode, applyVisibility]);
+
   // ── poll for new diffs every 2 s ─────────────────────────────────────────
   useEffect(() => {
     if (!project || !baseAST) return;
-
     const interval = setInterval(() => {
       fetch(`/api/diffs/${project}/ledger`, { headers: { 'Cache-Control': 'no-cache' } })
         .then(r => r.json())
         .then((ldgr: DiffLedger) => {
           if (ldgr.diffs.length <= lastDiffCount.current) return;
-
           const newDiffs = ldgr.diffs.slice(lastDiffCount.current);
           lastDiffCount.current = ldgr.diffs.length;
           setLedger(ldgr);
-
-          // Update committed ref silently so submit diff is always clean.
           committedRef.current = applyDiffs(baseAST, ldgr.diffs, null);
-
           if (newDiffs.some(d => d.author === 'ai')) {
             setHasNewAIDiff(true);
-
-            // Auto-update canvas only when user hasn't made uncommitted edits.
             if (!isDirtyRef.current && !isHistoryMode) {
-              const { flowNodes, flowEdges } = layoutGraph(committedRef.current.nodes, committedRef.current.edges);
-              setNodes(flowNodes);
-              setEdges(flowEdges);
+              applyLayout(committedRef.current.nodes, committedRef.current.edges);
             }
           }
         })
         .catch(() => {});
     }, 2000);
-
     return () => clearInterval(interval);
-  }, [project, baseAST, isHistoryMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [project, baseAST]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── edge type toggle — NO Dagre ───────────────────────────────────────────
+  const toggleEdgeType = useCallback((rel: string) => {
+    const next = new Set(hiddenTypesRef.current);
+    if (next.has(rel)) next.delete(rel); else next.add(rel);
+    hiddenTypesRef.current = next;
+    setHiddenEdgeTypes(new Set(next)); // re-render legend only
+    applyVisibility();
+  }, [applyVisibility]);
 
   // ── diff navigation ───────────────────────────────────────────────────────
   const handleDiffSelect = useCallback((value: string) => {
     if (!baseAST || !ledger) return;
-
     const diffId = value === 'latest' ? null : Number(value);
     setViewDiffId(diffId);
     setHasNewAIDiff(false);
 
     if (diffId === null) {
-      // Back to latest committed state — refresh canvas
       const committed = applyDiffs(baseAST, ledger.diffs, null);
       committedRef.current = committed;
       isDirtyRef.current = false;
-      const { flowNodes, flowEdges } = layoutGraph(committed.nodes, committed.edges);
-      setNodes(flowNodes);
-      setEdges(flowEdges);
+      applyLayout(committed.nodes, committed.edges);
     } else {
-      // Historical view with red/green overlay vs parent diff
       const currState = applyDiffs(baseAST, ledger.diffs, diffId);
-      const diff = ledger.diffs.find(d => d.diff_id === diffId);
+      const diff      = ledger.diffs.find(d => d.diff_id === diffId);
       let overlay: Map<string, 'added' | 'removed'> | undefined;
       let displayNodes = currState.nodes;
-
       if (diff) {
         const prevState = applyDiffs(baseAST, ledger.diffs, diff.parent_diff_id);
         overlay = diffOverlay(prevState, currState);
-        // Show ghost nodes for items removed in this diff
         const ghosts = prevState.nodes.filter(n => overlay!.get(n.id) === 'removed');
         displayNodes = [...currState.nodes, ...ghosts];
       }
-
-      const { flowNodes, flowEdges } = layoutGraph(displayNodes, currState.edges, overlay);
-      setNodes(flowNodes);
-      setEdges(flowEdges);
+      applyLayout(displayNodes, currState.edges, overlay);
     }
-  }, [baseAST, ledger, setNodes, setEdges]);
+  }, [baseAST, ledger, applyLayout]);
 
   // ── dirty tracking ────────────────────────────────────────────────────────
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
@@ -252,7 +307,7 @@ export default function App() {
   const onConnect = useCallback((params: Connection | FlowEdge) => {
     isDirtyRef.current = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setEdges(eds => addEdge({ ...params, label: 'CALLS', ...EDGE_DEFAULTS } as any, eds));
+    setEdges(eds => addEdge({ ...params, label: 'CALLS' } as any, eds));
   }, [setEdges]);
 
   // ── add node ──────────────────────────────────────────────────────────────
@@ -274,10 +329,9 @@ export default function App() {
   // ── submit diff ───────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
     if (!project || !ledger || !baseAST) return;
-
-    const committed = committedRef.current;
-    const latestDiff = ledger.diffs[ledger.diffs.length - 1];
-    const nextId = (latestDiff?.diff_id ?? 0) + 1;
+    const committed    = committedRef.current;
+    const latestDiff   = ledger.diffs[ledger.diffs.length - 1];
+    const nextId       = (latestDiff?.diff_id ?? 0) + 1;
 
     const committedNodeIds = new Set(committed.nodes.map(n => n.id));
     const currentNodeIds   = new Set(nodes.map(n => n.id));
@@ -291,28 +345,20 @@ export default function App() {
       .map(n => n.id);
 
     const currentEdgesAST: ASTEdge[] = edges.map(e => ({
-      source: e.source,
-      target: e.target,
-      rel: (e.label ?? 'CALLS') as string,
+      source: e.source, target: e.target, rel: (e.label ?? 'CALLS') as string,
     }));
 
     const committedEdgeKeys = new Set(committed.edges.map(edgeKey));
     const currentEdgeKeys   = new Set(currentEdgesAST.map(edgeKey));
-
     const addedEdges   = currentEdgesAST.filter(e => !committedEdgeKeys.has(edgeKey(e)));
     const removedEdges = committed.edges.filter(e => !currentEdgeKeys.has(edgeKey(e)));
 
     const diff: Diff = {
-      diff_id:        nextId,
-      parent_diff_id: latestDiff?.diff_id ?? null,
-      author:         'user',
-      timestamp:      new Date().toISOString(),
-      label:          `User edit #${nextId}`,
-      added_nodes:    addedNodes,
-      removed_nodes:  removedNodeIds,
-      added_edges:    addedEdges,
-      removed_edges:  removedEdges,
-      annotations:    [],
+      diff_id: nextId, parent_diff_id: latestDiff?.diff_id ?? null,
+      author: 'user', timestamp: new Date().toISOString(),
+      label: `User edit #${nextId}`,
+      added_nodes: addedNodes, removed_nodes: removedNodeIds,
+      added_edges: addedEdges, removed_edges: removedEdges, annotations: [],
     };
 
     await fetch(`/api/diffs/${project}/submit`, {
@@ -321,36 +367,28 @@ export default function App() {
       body: JSON.stringify(diff),
     });
 
-    // Reload ledger and reset canvas to new committed state
     const ldgr: DiffLedger = await fetch(`/api/diffs/${project}/ledger`).then(r => r.json());
     setLedger(ldgr);
     lastDiffCount.current = ldgr.diffs.length;
     setViewDiffId(null);
     setHasNewAIDiff(false);
     isDirtyRef.current = false;
-
     const newCommitted = applyDiffs(baseAST, ldgr.diffs, null);
     committedRef.current = newCommitted;
-    const { flowNodes, flowEdges } = layoutGraph(newCommitted.nodes, newCommitted.edges);
-    setNodes(flowNodes);
-    setEdges(flowEdges);
-  }, [project, ledger, baseAST, nodes, edges, setNodes, setEdges]);
+    applyLayout(newCommitted.nodes, newCommitted.edges);
+  }, [project, ledger, baseAST, nodes, edges, applyLayout]);
 
   // ── publish ───────────────────────────────────────────────────────────────
   const handlePublish = useCallback(async () => {
     if (!project || !ledger) return;
     const latestDiff = ledger.diffs[ledger.diffs.length - 1];
     const publishDiff: Diff = {
-      diff_id:        (latestDiff?.diff_id ?? 0) + 1,
+      diff_id: (latestDiff?.diff_id ?? 0) + 1,
       parent_diff_id: latestDiff?.diff_id ?? null,
-      author:         'user',
-      timestamp:      new Date().toISOString(),
-      label:          'Publish',
-      added_nodes:    [],
-      removed_nodes:  [],
-      added_edges:    [],
-      removed_edges:  [],
-      annotations:    [{ id: 'publish', body: 'Publish: generate code from this graph state.', targets: [], diff_id: 0 }],
+      author: 'user', timestamp: new Date().toISOString(),
+      label: 'Publish', added_nodes: [], removed_nodes: [],
+      added_edges: [], removed_edges: [],
+      annotations: [{ id: 'publish', body: 'Publish: generate code from this graph state.', targets: [], diff_id: 0 }],
     };
     await fetch(`/api/diffs/${project}/submit`, {
       method: 'POST',
@@ -359,25 +397,26 @@ export default function App() {
     });
   }, [project, ledger]);
 
-  // ── diff label helper ─────────────────────────────────────────────────────
-  const diffLabel = useMemo(() => (d: { author: string; label: string }) =>
-    `${d.author === 'ai' ? '🤖' : '👤'} ${d.label}`,
-  []);
+  // ── legend ────────────────────────────────────────────────────────────────
+  const activeEdgeTypes = useMemo(
+    () => Object.keys(EDGE_STYLES),
+    [],
+  );
+
+  const diffLabel = (d: { author: string; label: string }) =>
+    `${d.author === 'ai' ? '🤖' : '👤'} ${d.label}`;
+
+  const lodLabel = zoom >= 0.35 ? 'Full' : zoom >= 0.15 ? 'Modules' : 'Files';
 
   // ─────────────────────────────────────────────────────────────────────────
 
   return (
     <div className="app-root">
-      {/* ── toolbar ── */}
       <div className="toolbar">
-        <span className="app-title">DirGraph Viewer</span>
+        <span className="app-title">DirGraph</span>
 
-        <select
-          className="select"
-          value={project}
-          onChange={e => setProject(e.target.value)}
-        >
-          <option value="">— select project —</option>
+        <select className="select" value={project} onChange={e => setProject(e.target.value)}>
+          <option value="">— project —</option>
           {projects.map(p => <option key={p} value={p}>{p}</option>)}
         </select>
 
@@ -387,83 +426,93 @@ export default function App() {
             value={viewDiffId ?? 'latest'}
             onChange={e => handleDiffSelect(e.target.value)}
           >
-            <option value="latest">
-              Latest{hasNewAIDiff ? ' 🔵' : ''}
-            </option>
+            <option value="latest">Latest{hasNewAIDiff ? ' 🔵' : ''}</option>
             {ledger.diffs.map(d => (
-              <option key={d.diff_id} value={d.diff_id}>
-                #{d.diff_id} {diffLabel(d)}
-              </option>
+              <option key={d.diff_id} value={d.diff_id}>#{d.diff_id} {diffLabel(d)}</option>
             ))}
           </select>
         )}
 
         {isHistoryMode && (
-          <button className="btn btn--ghost" onClick={() => handleDiffSelect('latest')}>
-            ← Latest
-          </button>
+          <button className="btn btn--ghost" onClick={() => handleDiffSelect('latest')}>← Latest</button>
         )}
 
         <div style={{ flex: 1 }} />
+        <span className="lod-badge">LOD: {lodLabel}</span>
 
         {!isHistoryMode && (
           <>
-            <button className="btn btn--ghost" onClick={() => setShowAddNode(true)}>
-              + Node
-            </button>
-            <button
-              className="btn btn--primary"
-              onClick={handleSubmit}
-              disabled={!baseAST}
-            >
-              Submit
-            </button>
+            <button className="btn btn--ghost" onClick={() => setShowAddNode(true)}>+ Node</button>
+            <button className="btn btn--primary" onClick={handleSubmit} disabled={!baseAST}>Submit</button>
             {showPublish && (
-              <button className="btn btn--publish" onClick={handlePublish}>
-                Publish Changes
-              </button>
+              <button className="btn btn--publish" onClick={handlePublish}>Publish Changes</button>
             )}
           </>
         )}
-
         {isHistoryMode && (
           <span className="toolbar-badge">Viewing diff #{viewDiffId} — read only</span>
         )}
       </div>
 
-      {/* ── canvas ── */}
       <div className="canvas-wrap">
+        {loading && <div className="canvas-loading">Computing layout…</div>}
+
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodesChange={isHistoryMode ? undefined : handleNodesChange}
           onEdgesChange={isHistoryMode ? undefined : handleEdgesChange}
           onConnect={isHistoryMode ? undefined : onConnect}
+          onMoveEnd={handleMoveEnd}
           nodesDraggable={!isHistoryMode}
           nodesConnectable={!isHistoryMode}
           elementsSelectable={!isHistoryMode}
           nodeTypes={nodeTypes}
           deleteKeyCode={['Backspace', 'Delete']}
+          onlyRenderVisibleElements
           fitView
           colorMode="dark"
           minZoom={0.05}
         >
           <Controls />
           <Background color="#30363d" gap={20} size={2} />
+
+          <div className="legend">
+            <div className="legend-title">Edge types</div>
+            {activeEdgeTypes.map(rel => {
+              const s      = EDGE_STYLES[rel];
+              const hidden = hiddenEdgeTypes.has(rel);
+              return (
+                <button
+                  key={rel}
+                  className={`legend-item${hidden ? ' legend-item--off' : ''}`}
+                  onClick={() => toggleEdgeType(rel)}
+                  title={hidden ? `Show ${rel}` : `Hide ${rel}`}
+                >
+                  <span
+                    className="legend-line"
+                    style={{
+                      background: hidden ? '#30363d' : s.color,
+                      height: `${Math.max(1, s.weight)}px`,
+                    }}
+                  />
+                  <span className="legend-rel" style={{ color: hidden ? '#484f58' : s.color }}>
+                    {rel}
+                  </span>
+                  {s.animated && !hidden && <span className="legend-flow">~</span>}
+                </button>
+              );
+            })}
+          </div>
         </ReactFlow>
       </div>
 
-      {/* ── add node modal ── */}
       {showAddNode && (
         <div className="modal-overlay" onClick={() => setShowAddNode(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h3 className="modal-title">Add Node</h3>
-            <select
-              className="select select--full"
-              value={newNodeType}
-              onChange={e => setNewNodeType(e.target.value)}
-            >
-              {['Module', 'Function', 'Class', 'File', 'Annotation'].map(t => (
+            <select className="select select--full" value={newNodeType} onChange={e => setNewNodeType(e.target.value)}>
+              {['Module', 'Class', 'File', 'BusinessRule', 'Contract', 'Domain', 'Copy', 'Annotation'].map(t => (
                 <option key={t} value={t}>{t}</option>
               ))}
             </select>

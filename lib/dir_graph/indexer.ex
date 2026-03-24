@@ -60,7 +60,8 @@ defmodule DirGraph.Indexer do
 
   @doc """
   Recursively indexes all supported source files under `dir_path`.
-  Skips node_modules, _build, deps, .git.
+  Skips node_modules, _build, deps, .git, dist.
+  Respects `.dir_graphignore` in the indexed directory (one path fragment per line).
   After indexing, runs a cross-file reference resolution pass that adds IMPORTS edges
   between File nodes.
   Returns the fully-linked graph.
@@ -74,6 +75,8 @@ defmodule DirGraph.Indexer do
   Public so `DirGraph.Server` can use it for startup sync without re-indexing.
   """
   def collect_files(dir_path) do
+    ignore_fragments = load_ignore_fragments(dir_path)
+
     @supported_extensions
     |> Enum.flat_map(fn ext ->
       Path.wildcard(Path.join([dir_path, "**", "*#{ext}"]))
@@ -82,9 +85,28 @@ defmodule DirGraph.Indexer do
       String.contains?(path, "/node_modules/") or
         String.contains?(path, "/_build/") or
         String.contains?(path, "/deps/") or
-        String.contains?(path, "/.git/")
+        String.contains?(path, "/.git/") or
+        String.contains?(path, "/dist/") or
+        Enum.any?(ignore_fragments, &String.contains?(path, &1))
     end)
     |> Enum.uniq()
+  end
+
+  # Reads `.dir_graphignore` from `dir_path` and returns a list of path fragments to exclude.
+  # Lines starting with `#` and blank lines are ignored.
+  defp load_ignore_fragments(dir_path) do
+    ignore_path = Path.join(dir_path, ".dir_graphignore")
+
+    case File.read(ignore_path) do
+      {:ok, contents} ->
+        contents
+        |> String.split("\n")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(String.starts_with?(&1, "#") or &1 == ""))
+
+      {:error, _} ->
+        []
+    end
   end
 
   @doc """

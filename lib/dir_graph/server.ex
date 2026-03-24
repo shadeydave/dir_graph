@@ -73,6 +73,16 @@ defmodule DirGraph.Server do
     GenServer.call(__MODULE__, :workspace_stats)
   end
 
+  @doc """
+  Applies a surgical mutation payload to a source file using the current graph for
+  node lookup. Verifies Elixir syntax before writing. Re-indexes the file on success
+  so the graph stays in sync.
+  Returns `{:ok, new_source}` or `{:error, reason}`.
+  """
+  def apply_diff(file_path, diff_payload) do
+    GenServer.call(__MODULE__, {:apply_diff, file_path, diff_payload}, :infinity)
+  end
+
   # Content node API — all calls are synchronous for data consistency.
 
   @doc "Create a content node, add it to the graph, and return it."
@@ -265,8 +275,10 @@ defmodule DirGraph.Server do
 
   @impl true
   def handle_call({:extract_slice, search_term, opts}, _from, state) do
-    depth        = Keyword.get(opts, :depth, 2)
-    include_code = Keyword.get(opts, :include_code, false)
+    depth         = Keyword.get(opts, :depth, 2)
+    include_code  = Keyword.get(opts, :include_code, false)
+    node_type     = Keyword.get(opts, :node_type, nil)
+    include_types = if node_type, do: List.wrap(node_type), else: :all
 
     case Analyzer.find_node(state.graph, search_term) do
       nil ->
@@ -274,7 +286,7 @@ defmodule DirGraph.Server do
 
       vertex_id ->
         subgraph = Analyzer.extract_slice(state.graph, vertex_id, depth)
-        payload  = Analyzer.format_for_llm(subgraph, include_code: include_code, full_graph: state.graph)
+        payload  = Analyzer.format_for_llm(subgraph, include_code: include_code, include_types: include_types, full_graph: state.graph)
         {:reply, {:ok, payload}, state}
     end
   end
@@ -298,6 +310,19 @@ defmodule DirGraph.Server do
   @impl true
   def handle_call({:find_tests, search_term, opts}, _from, state) do
     {:reply, Analyzer.find_tests(state.graph, search_term, opts), state}
+  end
+
+  @impl true
+  def handle_call({:apply_diff, file_path, diff_payload}, _from, state) do
+    case DirGraph.Weaver.apply_diff(file_path, state.graph, diff_payload) do
+      {:ok, new_source} ->
+        # Re-index the modified file to keep the graph in sync.
+        {new_graph, _refs} = Indexer.index_file(file_path, state.graph)
+        {:reply, {:ok, new_source}, %{state | graph: new_graph}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
@@ -335,15 +360,16 @@ defmodule DirGraph.Server do
     capability_gaps = DirGraph.LSP.ServerRegistry.gap_report()
 
     stats = %{
-      total_nodes:      length(vertices),
-      total_edges:      length(edges),
-      calls_edges:      calls_edges,
-      files_indexed:    Map.get(nodes_by_type, "File", 0),
-      nodes_by_type:    nodes_by_type,
-      top_connected:    top_connected,
-      watched_dirs:     DirGraph.Watcher.watched_dirs(),
-      embeddings_ready: DirGraph.RAG.size(),
-      capability_gaps:  capability_gaps
+      total_nodes:          length(vertices),
+      total_edges:          length(edges),
+      calls_edges:          calls_edges,
+      files_indexed:        Map.get(nodes_by_type, "File", 0),
+      nodes_by_type:        nodes_by_type,
+      top_connected:        top_connected,
+      watched_dirs:         DirGraph.Watcher.watched_dirs(),
+      embeddings_ready:     DirGraph.RAG.size(),
+      embeddings_available: DirGraph.Embeddings.available?(),
+      capability_gaps:      capability_gaps
     }
 
     {:reply, stats, state}
@@ -524,9 +550,18 @@ defmodule DirGraph.Server do
   end
 
   @impl true
+  # Node types for the top-level architectural view in the viewer.
+  # Function/Call nodes are too granular for planning — they're available
+  # via the analysis tools but would make the canvas unworkable.
+  # Content nodes (BusinessRule etc.) are always included.
+  @viewer_node_types ~w(File Module Class BusinessRule Copy Contract Domain)
+
   def handle_call({:export_viewer_data, project}, _from, state) do
+    all_nodes = CG.all_nodes(state.graph)
+
     nodes =
-      CG.all_nodes(state.graph)
+      all_nodes
+      |> Enum.filter(fn n -> to_string(n[:type] || "") in @viewer_node_types end)
       |> Enum.map(fn n ->
         %{
           "id"   => to_string(n[:id]   || ""),
@@ -537,8 +572,13 @@ defmodule DirGraph.Server do
         }
       end)
 
+    node_ids = MapSet.new(nodes, & &1["id"])
+
     edges =
       Graph.edges(state.graph)
+      |> Enum.filter(fn e ->
+        MapSet.member?(node_ids, e.v1) and MapSet.member?(node_ids, e.v2)
+      end)
       |> Enum.map(fn e ->
         %{"source" => e.v1, "target" => e.v2, "rel" => to_string(e.label)}
       end)
