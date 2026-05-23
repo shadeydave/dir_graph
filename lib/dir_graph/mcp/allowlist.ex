@@ -61,6 +61,8 @@ defmodule DirGraph.MCP.Allowlist do
     apply_diff
     dream_status
     dream_enrich
+    get_node_source
+    get_call_chain_source
   )
 
   @meta_tools ~w(
@@ -142,9 +144,12 @@ defmodule DirGraph.MCP.Allowlist do
 
     # Intersect against static limits — the plan can only restrict, never expand
     valid_tools = Enum.filter(proposed_tools, &(&1 in allowlist.static_tools))
-    valid_paths = Enum.filter(proposed_paths, fn p ->
-      path_allowed?(%{allowed_paths: allowlist.static_paths}, p)
-    end)
+
+    valid_paths =
+      Enum.filter(proposed_paths, fn p ->
+        path_allowed?(%{allowed_paths: allowlist.static_paths}, p)
+      end)
+
     valid_depth = min(proposed_depth, allowlist.max_search_depth)
 
     draft = %{
@@ -226,14 +231,15 @@ defmodule DirGraph.MCP.Allowlist do
     plan_paths = coerce_string_list(Map.get(plan, "allowed_paths", base.static_paths))
     plan_depth = coerce_depth(Map.get(plan, "max_search_depth", base.max_search_depth))
 
-    %{base |
-      allowed_tools:
-        base.allowed_tools
-        |> Enum.filter(&(&1 in plan_tools))
-        |> Enum.filter(&(&1 in @operational_tools)),
-      allowed_paths: Enum.filter(base.static_paths, &(&1 in plan_paths)),
-      max_search_depth: min(base.max_search_depth, plan_depth),
-      active_plan: plan
+    %{
+      base
+      | allowed_tools:
+          base.allowed_tools
+          |> Enum.filter(&(&1 in plan_tools))
+          |> Enum.filter(&(&1 in @operational_tools)),
+        allowed_paths: Enum.filter(base.static_paths, &(&1 in plan_paths)),
+        max_search_depth: min(base.max_search_depth, plan_depth),
+        active_plan: plan
     }
   end
 

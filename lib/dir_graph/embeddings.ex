@@ -43,7 +43,7 @@ defmodule DirGraph.Embeddings do
   """
   @spec embed(String.t()) :: {:ok, [float()]} | {:error, term()}
   def embed(text) when is_binary(text) and byte_size(text) > 0 do
-    config  = load_config()
+    config = load_config()
     backend = Map.get(config, "backend", "ollama")
     do_embed(backend, config, text)
   end
@@ -53,7 +53,7 @@ defmodule DirGraph.Embeddings do
   @doc "Returns true if an embedding backend is reachable and configured."
   @spec available?() :: boolean()
   def available? do
-    config  = load_config()
+    config = load_config()
     backend = Map.get(config, "backend", "ollama")
     probe(backend, config)
   end
@@ -63,7 +63,7 @@ defmodule DirGraph.Embeddings do
   # ----------------------------------------------------------------
 
   defp do_embed("ollama", config, text) do
-    url   = Map.get(config, "url", "http://localhost:11434")
+    url = Map.get(config, "url", "http://localhost:11434")
     model = Map.get(config, "model", "nomic-embed-text")
 
     case Req.post("#{url}/api/embeddings", json: %{model: model, prompt: text}) do
@@ -79,7 +79,7 @@ defmodule DirGraph.Embeddings do
   end
 
   defp do_embed("openai", config, text) do
-    model   = Map.get(config, "model", "text-embedding-3-small")
+    model = Map.get(config, "model", "text-embedding-3-small")
     key_env = Map.get(config, "api_key_env", "OPENAI_API_KEY")
     api_key = System.get_env(key_env)
 
@@ -109,12 +109,15 @@ defmodule DirGraph.Embeddings do
 
   # Quick reachability probe — verifies Ollama is up AND the configured model is pulled.
   defp probe("ollama", config) do
-    url   = Map.get(config, "url", "http://localhost:11434")
+    url = Map.get(config, "url", "http://localhost:11434")
     model = Map.get(config, "model", "nomic-embed-text")
 
     case Req.get("#{url}/api/tags") do
       {:ok, %{status: 200, body: %{"models" => models}}} ->
-        Enum.any?(models, fn m -> Map.get(m, "name") == model end)
+        Enum.any?(models, fn m ->
+          name = Map.get(m, "name", "")
+          name == model or String.starts_with?(name, model <> ":")
+        end)
 
       _ ->
         false
@@ -134,8 +137,8 @@ defmodule DirGraph.Embeddings do
   # ----------------------------------------------------------------
 
   defp load_config do
-    with true          <- File.exists?(@config_path),
-         {:ok, raw}    <- File.read(@config_path),
+    with true <- File.exists?(@config_path),
+         {:ok, raw} <- File.read(@config_path),
          {:ok, decoded} <- Jason.decode(raw) do
       Map.get(decoded, "embeddings", %{})
     else

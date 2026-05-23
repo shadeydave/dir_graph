@@ -16,7 +16,8 @@ defmodule DirGraph.ContentStoreTest do
 
   describe "make_id/2" do
     test "slugifies name and prefixes with type" do
-      assert ContentStore.make_id("BusinessRule", "Payment Approval") == "BusinessRule:payment_approval"
+      assert ContentStore.make_id("BusinessRule", "Payment Approval") ==
+               "BusinessRule:payment_approval"
     end
 
     test "collapses special characters to underscores" do
@@ -40,7 +41,7 @@ defmodule DirGraph.ContentStoreTest do
     end
 
     test "overwrites an existing node with the same ID" do
-      node    = sample_node("BusinessRule:test_rule")
+      node = sample_node("BusinessRule:test_rule")
       updated = Map.put(node, "content", "Updated content")
 
       ContentStore.put(node)
@@ -168,9 +169,9 @@ defmodule DirGraph.ContentStoreTest do
     test "includes the four canonical types" do
       types = ContentStore.valid_types()
       assert "BusinessRule" in types
-      assert "Copy"         in types
-      assert "Contract"     in types
-      assert "Domain"       in types
+      assert "Copy" in types
+      assert "Contract" in types
+      assert "Domain" in types
     end
   end
 
@@ -180,10 +181,10 @@ defmodule DirGraph.ContentStoreTest do
 
   defp sample_node(id, opts \\ []) do
     %{
-      "id"         => id,
-      "type"       => String.split(id, ":") |> hd(),
-      "name"       => id,
-      "content"    => "Sample content for #{id}",
+      "id" => id,
+      "type" => String.split(id, ":") |> hd(),
+      "name" => id,
+      "content" => "Sample content for #{id}",
       "implements" => Keyword.get(opts, :implements, []),
       "created_at" => "2024-01-01T00:00:00Z",
       "updated_at" => "2024-01-01T00:00:00Z"

@@ -30,9 +30,9 @@ defmodule DirGraph.WeaverTest do
   defp build_graph(file_path) do
     CG.new()
     |> CG.add_node("fn:target", "Function", "target_fn", %{file: file_path, line: 3, end_line: 3})
-    |> CG.add_node("fn:block",  "Function", "block_fn",  %{file: file_path, line: 4, end_line: 6})
-    |> CG.add_node("fn:footer", "Function", "footer",    %{file: file_path, line: 7, end_line: 7})
-    |> CG.add_node("fn:target2","Function", "target2",   %{file: file_path, line: 3, end_line: 3})
+    |> CG.add_node("fn:block", "Function", "block_fn", %{file: file_path, line: 4, end_line: 6})
+    |> CG.add_node("fn:footer", "Function", "footer", %{file: file_path, line: 7, end_line: 7})
+    |> CG.add_node("fn:target2", "Function", "target2", %{file: file_path, line: 3, end_line: 3})
   end
 
   defp write_fixture(tmp_dir, content \\ @source) do
@@ -49,15 +49,18 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "replaces the target line and produces valid Elixir", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      {:ok, result} = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{
-          "node_id"  => "fn:target",
-          "action"   => "replace",
-          "new_code" => "def target_fn, do: :replaced"
-        }]
-      })
+      {:ok, result} =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [
+            %{
+              "node_id" => "fn:target",
+              "action" => "replace",
+              "new_code" => "def target_fn, do: :replaced"
+            }
+          ]
+        })
 
       assert String.contains?(result, ":replaced")
       assert String.contains?(result, "def header")
@@ -68,17 +71,22 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "preserves the original line's indentation", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      {:ok, result} = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{
-          "node_id"  => "fn:target",
-          "action"   => "replace",
-          "new_code" => "def target_fn, do: :new_body"
-        }]
-      })
+      {:ok, result} =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [
+            %{
+              "node_id" => "fn:target",
+              "action" => "replace",
+              "new_code" => "def target_fn, do: :new_body"
+            }
+          ]
+        })
 
-      replaced_line = result |> String.split("\n") |> Enum.find(&String.contains?(&1, ":new_body"))
+      replaced_line =
+        result |> String.split("\n") |> Enum.find(&String.contains?(&1, ":new_body"))
+
       assert String.starts_with?(replaced_line, "  ")
     end
   end
@@ -91,15 +99,18 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "replaces entire block from line to end_line", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      {:ok, result} = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{
-          "node_id"  => "fn:block",
-          "action"   => "replace_node",
-          "new_code" => "def block_fn, do: :rewritten"
-        }]
-      })
+      {:ok, result} =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [
+            %{
+              "node_id" => "fn:block",
+              "action" => "replace_node",
+              "new_code" => "def block_fn, do: :rewritten"
+            }
+          ]
+        })
 
       assert String.contains?(result, "def block_fn, do: :rewritten")
       assert String.contains?(result, "def header")
@@ -116,18 +127,21 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "inserts a new line immediately after the target line", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      {:ok, result} = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{
-          "node_id"  => "fn:footer",
-          "action"   => "insert_after",
-          "new_code" => "def injected, do: :new"
-        }]
-      })
+      {:ok, result} =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [
+            %{
+              "node_id" => "fn:footer",
+              "action" => "insert_after",
+              "new_code" => "def injected, do: :new"
+            }
+          ]
+        })
 
-      lines        = String.split(result, "\n")
-      footer_idx   = Enum.find_index(lines, &String.contains?(&1, "def footer"))
+      lines = String.split(result, "\n")
+      footer_idx = Enum.find_index(lines, &String.contains?(&1, "def footer"))
       injected_idx = Enum.find_index(lines, &String.contains?(&1, "def injected"))
 
       assert injected_idx == footer_idx + 1
@@ -142,11 +156,12 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "removes the target line", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      {:ok, result} = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{"node_id" => "fn:footer", "action" => "delete"}]
-      })
+      {:ok, result} =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [%{"node_id" => "fn:footer", "action" => "delete"}]
+        })
 
       refute String.contains?(result, "def footer")
       assert String.contains?(result, "def header")
@@ -159,18 +174,23 @@ defmodule DirGraph.WeaverTest do
 
   describe "syntax verification" do
     @tag :tmp_dir
-    test "rejects a mutation producing invalid Elixir and does NOT write the file", %{tmp_dir: dir} do
-      path     = write_fixture(dir)
+    test "rejects a mutation producing invalid Elixir and does NOT write the file", %{
+      tmp_dir: dir
+    } do
+      path = write_fixture(dir)
       original = File.read!(path)
-      g        = build_graph(path)
+      g = build_graph(path)
 
-      result = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{
-          "node_id"  => "fn:target",
-          "action"   => "replace",
-          "new_code" => "def broken({{{{ invalid syntax"
-        }]
-      })
+      result =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [
+            %{
+              "node_id" => "fn:target",
+              "action" => "replace",
+              "new_code" => "def broken({{{{ invalid syntax"
+            }
+          ]
+        })
 
       assert {:error, {:syntax_error, _reason, _src}} = result
       # File must be completely untouched
@@ -180,15 +200,18 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "accepts a valid mutation and writes the file", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      assert {:ok, _} = Weaver.apply_diff(path, g, %{
-        "mutations" => [%{
-          "node_id"  => "fn:target",
-          "action"   => "replace",
-          "new_code" => "def target_fn, do: :valid_replacement"
-        }]
-      })
+      assert {:ok, _} =
+               Weaver.apply_diff(path, g, %{
+                 "mutations" => [
+                   %{
+                     "node_id" => "fn:target",
+                     "action" => "replace",
+                     "new_code" => "def target_fn, do: :valid_replacement"
+                   }
+                 ]
+               })
 
       assert File.read!(path) |> String.contains?(":valid_replacement")
     end
@@ -202,14 +225,23 @@ defmodule DirGraph.WeaverTest do
     @tag :tmp_dir
     test "all mutations applied in correct reverse-line order", %{tmp_dir: dir} do
       path = write_fixture(dir)
-      g    = build_graph(path)
+      g = build_graph(path)
 
-      {:ok, result} = Weaver.apply_diff(path, g, %{
-        "mutations" => [
-          %{"node_id" => "fn:target", "action" => "replace", "new_code" => "def target_fn, do: :mutated_target"},
-          %{"node_id" => "fn:footer", "action" => "replace", "new_code" => "def footer, do: :mutated_footer"}
-        ]
-      })
+      {:ok, result} =
+        Weaver.apply_diff(path, g, %{
+          "mutations" => [
+            %{
+              "node_id" => "fn:target",
+              "action" => "replace",
+              "new_code" => "def target_fn, do: :mutated_target"
+            },
+            %{
+              "node_id" => "fn:footer",
+              "action" => "replace",
+              "new_code" => "def footer, do: :mutated_footer"
+            }
+          ]
+        })
 
       assert String.contains?(result, ":mutated_target")
       assert String.contains?(result, ":mutated_footer")

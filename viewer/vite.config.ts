@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-const DIFFS_DIR = path.join(process.env.HOME ?? '', 'sites', 'diffs')
+const DIFFS_DIR = process.env.DIRGRAPH_DIFFS_DIR || path.join(process.env.HOME ?? '', 'sites', 'diffs')
 
 function getBody(req: IncomingMessage): Promise<string> {
   return new Promise(resolve => {

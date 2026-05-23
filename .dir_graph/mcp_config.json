@@ -1,6 +1,5 @@
 {
   "_comment": "DirGraph MCP Allowlist. Edit allowed_tools and allowed_paths to control Claude's access.",
-
   "allowed_tools": [
     "query_code_graph",
     "affected_by",
@@ -17,12 +16,38 @@
     "neo4j_setup_schema",
     "propose_session_plan",
     "approve_session_plan",
-    "revoke_session_plan"
+    "revoke_session_plan",
+    "dream_status",
+    "dream_enrich",
+    "apply_diff",
+    "find_tests",
+    "find_implementations",
+    "add_content_node",
+    "update_content_node",
+    "delete_content_node",
+    "list_content_nodes",
+    "record_attempt",
+    "resolve_problem",
+    "list_problems",
+    "reset_ledger",
+    "watch_directory",
+    "unwatch_directory",
+    "sync_graph",
+    "spawn_process",
+    "list_processes",
+    "read_output",
+    "tail_output",
+    "stop_process",
+    "reload_code",
+    "get_node_source",
+    "get_call_chain_source"
   ],
-
   "allowed_paths": [
     "."
   ],
-
+  "dream": {
+    "model": "qwen3-coder:30b",
+    "concurrency": 2
+  },
   "max_search_depth": 4
 }

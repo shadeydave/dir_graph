@@ -50,8 +50,12 @@ defmodule DirGraph.Indexer do
     ext = Path.extname(file_path)
 
     cond do
-      ext in @elixir_extensions -> index_elixir_file(file_path, graph)
-      ext in @lsp_extensions    -> DirGraph.LSP.Indexer.index_file(file_path, graph)
+      ext in @elixir_extensions ->
+        index_elixir_file(file_path, graph)
+
+      ext in @lsp_extensions ->
+        DirGraph.LSP.Indexer.index_file(file_path, graph)
+
       true ->
         Logger.warning("Skipping unsupported file type: #{file_path}")
         {graph, []}
@@ -82,11 +86,11 @@ defmodule DirGraph.Indexer do
       Path.wildcard(Path.join([dir_path, "**", "*#{ext}"]))
     end)
     |> Enum.reject(fn path ->
-      String.contains?(path, "/node_modules/") or
-        String.contains?(path, "/_build/") or
-        String.contains?(path, "/deps/") or
-        String.contains?(path, "/.git/") or
-        String.contains?(path, "/dist/") or
+      excluded_dir?(path, "node_modules") or
+        excluded_dir?(path, "_build") or
+        excluded_dir?(path, "deps") or
+        excluded_dir?(path, ".git") or
+        excluded_dir?(path, "dist") or
         Enum.any?(ignore_fragments, &String.contains?(path, &1))
     end)
     |> Enum.uniq()
@@ -107,6 +111,14 @@ defmodule DirGraph.Indexer do
       {:error, _} ->
         []
     end
+  end
+
+  # Matches paths that contain the given directory name as a segment, whether the
+  # path is absolute (/project/deps/foo) or relative (deps/foo or ./deps/foo).
+  defp excluded_dir?(path, dir) do
+    String.contains?(path, "/#{dir}/") or
+      String.starts_with?(path, "#{dir}/") or
+      String.starts_with?(path, "./#{dir}/")
   end
 
   @doc """
@@ -152,7 +164,14 @@ defmodule DirGraph.Indexer do
           resolve_elixir_ref(acc, module_name, from_file, "IMPORTS", module_to_file, file_to_node)
 
         {:require, module_name, from_file, _line} ->
-          resolve_elixir_ref(acc, module_name, from_file, "REQUIRES", module_to_file, file_to_node)
+          resolve_elixir_ref(
+            acc,
+            module_name,
+            from_file,
+            "REQUIRES",
+            module_to_file,
+            file_to_node
+          )
 
         {:js_import, import_path, from_file, _line} ->
           resolve_js_ref(acc, import_path, from_file, file_to_node)
@@ -227,7 +246,7 @@ defmodule DirGraph.Indexer do
   # ================================================================
 
   defp index_elixir(source, state) do
-    case Code.string_to_quoted(source, line: 1) do
+    case Code.string_to_quoted(source, line: 1, token_metadata: true) do
       {:ok, ast} ->
         walk(ast, state)
 
@@ -253,11 +272,13 @@ defmodule DirGraph.Indexer do
   defp walk({:defmodule, meta, [{:__aliases__, _, parts}, [do: body]]}, state) do
     module_name = parts |> Enum.map(&to_string/1) |> Enum.join(".")
     line = Keyword.get(meta, :line, 0)
+    end_line = extract_end_line(meta, line)
     node_id = "Module:#{module_name}"
 
     graph =
       CG.add_node(state.graph, node_id, "Module", module_name, %{
         line: line,
+        end_line: end_line,
         file: state.file_path
       })
 
@@ -273,6 +294,7 @@ defmodule DirGraph.Indexer do
        when kind in [:def, :defp, :defmacro, :defmacrop] and is_atom(name) do
     arity = if is_list(args), do: length(args), else: 0
     line = Keyword.get(meta, :line, 0)
+    end_line = extract_end_line(meta, line)
     visibility = if kind in [:def, :defmacro], do: :public, else: :private
     parent_id = current_scope(state.scope_stack)
 
@@ -282,6 +304,7 @@ defmodule DirGraph.Indexer do
     graph =
       CG.add_node(state.graph, node_id, "Function", to_string(name), %{
         line: line,
+        end_line: end_line,
         arity: arity,
         visibility: visibility,
         file: state.file_path,
@@ -382,6 +405,17 @@ defmodule DirGraph.Indexer do
 
   # Leaf: atom, integer, string, nil, boolean, etc.
   defp walk(_leaf, state), do: state
+
+  # Extracts the closing line number from token_metadata.
+  # `Code.string_to_quoted(source, token_metadata: true)` adds `end: [line: N]`
+  # to the meta of block expressions (def/defmodule with do/end).
+  # One-liner forms (def foo, do: ...) have no :end key — fall back to start line.
+  defp extract_end_line(meta, default_line) do
+    case Keyword.get(meta, :end) do
+      nil -> default_line
+      end_meta -> Keyword.get(end_meta, :line, default_line)
+    end
+  end
 
   defp current_scope([{_kind, id} | _]), do: id
   defp current_scope([]), do: nil

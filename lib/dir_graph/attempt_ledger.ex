@@ -37,7 +37,7 @@ defmodule DirGraph.AttemptLedger do
 
   use GenServer
 
-  @warn_at_attempt  3
+  @warn_at_attempt 3
   @error_at_attempt 5
 
   # ----------------------------------------------------------------
@@ -101,8 +101,8 @@ defmodule DirGraph.AttemptLedger do
 
   @impl true
   def handle_call({:record_attempt, key, diagnostic}, _from, ledger) do
-    now         = DateTime.utc_now()
-    entry       = Map.get(ledger, key)
+    now = DateTime.utc_now()
+    entry = Map.get(ledger, key)
     fingerprint = if diagnostic, do: :erlang.phash2(diagnostic), else: nil
 
     {new_entry, response} =
@@ -112,25 +112,30 @@ defmodule DirGraph.AttemptLedger do
           {e, build_response(e)}
 
         %{status: :resolved} = e ->
-          e = %{e |
-            status:          :open,
-            attempt:         1,
-            recurrences:     e.recurrences + 1,
-            last_seen:       now,
-            last_diagnostic: diagnostic,
-            last_fingerprint: fingerprint
+          e = %{
+            e
+            | status: :open,
+              attempt: 1,
+              recurrences: e.recurrences + 1,
+              last_seen: now,
+              last_diagnostic: diagnostic,
+              last_fingerprint: fingerprint
           }
+
           {e, build_response(e)}
 
         e ->
           same_error = fingerprint != nil and fingerprint == e.last_fingerprint
-          e = %{e |
-            attempt:          e.attempt + 1,
-            last_seen:        now,
-            last_diagnostic:  diagnostic,
-            last_fingerprint: fingerprint,
-            same_error:       same_error
+
+          e = %{
+            e
+            | attempt: e.attempt + 1,
+              last_seen: now,
+              last_diagnostic: diagnostic,
+              last_fingerprint: fingerprint,
+              same_error: same_error
           }
+
           {e, build_response(e)}
       end
 
@@ -141,7 +146,9 @@ defmodule DirGraph.AttemptLedger do
   def handle_call({:resolve, key}, _from, ledger) do
     ledger =
       case Map.get(ledger, key) do
-        nil   -> ledger
+        nil ->
+          ledger
+
         entry ->
           Map.put(ledger, key, %{entry | status: :resolved, resolved_at: DateTime.utc_now()})
       end
@@ -176,16 +183,16 @@ defmodule DirGraph.AttemptLedger do
 
   defp new_entry(key, now, diagnostic, fingerprint) do
     %{
-      key:              key,
-      attempt:          1,
-      recurrences:      0,
-      status:           :open,
-      first_seen:       now,
-      last_seen:        now,
-      resolved_at:      nil,
-      last_diagnostic:  diagnostic,
+      key: key,
+      attempt: 1,
+      recurrences: 0,
+      status: :open,
+      first_seen: now,
+      last_seen: now,
+      resolved_at: nil,
+      last_diagnostic: diagnostic,
       last_fingerprint: fingerprint,
-      same_error:       false
+      same_error: false
     }
   end
 
@@ -235,7 +242,8 @@ defmodule DirGraph.AttemptLedger do
 
   defp build_response(%{attempt: 2} = entry) do
     Map.merge(summarise(entry), %{
-      message: "Second attempt on '#{entry.key}'. If the last fix didn't hold, check whether the approach itself is sound."
+      message:
+        "Second attempt on '#{entry.key}'. If the last fix didn't hold, check whether the approach itself is sound."
     })
   end
 
@@ -245,12 +253,12 @@ defmodule DirGraph.AttemptLedger do
 
   defp summarise(entry) do
     %{
-      key:         entry.key,
-      attempt:     entry.attempt,
+      key: entry.key,
+      attempt: entry.attempt,
       recurrences: entry.recurrences,
-      status:      Atom.to_string(entry.status),
-      first_seen:  DateTime.to_iso8601(entry.first_seen),
-      last_seen:   DateTime.to_iso8601(entry.last_seen)
+      status: Atom.to_string(entry.status),
+      first_seen: DateTime.to_iso8601(entry.first_seen),
+      last_seen: DateTime.to_iso8601(entry.last_seen)
     }
   end
 end

@@ -93,11 +93,16 @@ defmodule DirGraph.ContentStore do
   @spec add_link(String.t(), String.t()) :: {:ok, map()} | {:error, String.t()}
   def add_link(id, code_node_id) do
     case get(id) do
-      nil -> {:error, "Content node '#{id}' not found."}
+      nil ->
+        {:error, "Content node '#{id}' not found."}
+
       node ->
-        links   = Map.get(node, "implements", [])
-        updated = Map.put(node, "implements", Enum.uniq([code_node_id | links]))
-                  |> Map.put("updated_at", now())
+        links = Map.get(node, "implements", [])
+
+        updated =
+          Map.put(node, "implements", Enum.uniq([code_node_id | links]))
+          |> Map.put("updated_at", now())
+
         put(updated)
     end
   end
@@ -109,11 +114,16 @@ defmodule DirGraph.ContentStore do
   @spec remove_link(String.t(), String.t()) :: {:ok, map()} | {:error, String.t()}
   def remove_link(id, code_node_id) do
     case get(id) do
-      nil -> {:error, "Content node '#{id}' not found."}
+      nil ->
+        {:error, "Content node '#{id}' not found."}
+
       node ->
-        links   = Map.get(node, "implements", []) |> Enum.reject(&(&1 == code_node_id))
-        updated = Map.put(node, "implements", links)
-                  |> Map.put("updated_at", now())
+        links = Map.get(node, "implements", []) |> Enum.reject(&(&1 == code_node_id))
+
+        updated =
+          Map.put(node, "implements", links)
+          |> Map.put("updated_at", now())
+
         put(updated)
     end
   end

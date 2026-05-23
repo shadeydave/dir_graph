@@ -42,9 +42,9 @@ defmodule DirGraph.Dream do
   alias DirGraph.Graph, as: CG
 
   @config_path ".dir_graph/mcp_config.json"
-  @tick_ms          3_000
+  @tick_ms 3_000
   @enrichable_types ~w(Function Module)
-  @ollama_timeout  60_000
+  @ollama_timeout 60_000
 
   # ----------------------------------------------------------------
   # Public API
@@ -114,11 +114,12 @@ defmodule DirGraph.Dream do
           _ -> false
         end
       end)
+
     {:noreply, %{state | queue: enqueue_new(state.queue, node_ids)}}
   end
 
   @impl true
-  def handle_cast(:pause,  state), do: {:noreply, %{state | paused: true}}
+  def handle_cast(:pause, state), do: {:noreply, %{state | paused: true}}
   @impl true
   def handle_cast(:resume, state), do: {:noreply, %{state | paused: false}}
 
@@ -128,18 +129,22 @@ defmodule DirGraph.Dream do
 
   @impl true
   def handle_call(:status, _from, state) do
-    {:reply, %{
-      queue_depth: :queue.len(state.queue),
-      enriched:    EnrichmentStore.size(),
-      processed:   state.processed,
-      errors:      state.errors,
-      paused:      state.paused
-    }, state}
+    queue_depth = :queue.len(state.queue)
+
+    {:reply,
+     %{
+       queue_depth: queue_depth,
+       enriched: EnrichmentStore.size(),
+       processed: state.processed,
+       errors: state.errors,
+       paused: state.paused,
+       dreaming: not state.paused and queue_depth > 0
+     }, state}
   end
 
   @impl true
   def handle_call({:enrich_now, node_id, graph}, _from, state) do
-    cfg    = load_config()
+    cfg = load_config()
     result = do_enrich(node_id, graph, cfg)
     {:reply, result, state}
   end
@@ -156,7 +161,7 @@ defmodule DirGraph.Dream do
 
   @impl true
   def handle_info(:tick, state) do
-    cfg         = load_config()
+    cfg = load_config()
     concurrency = Map.get(cfg, "concurrency", 4)
 
     {batch, remaining_queue} = dequeue_batch(state.queue, concurrency)
@@ -166,26 +171,30 @@ defmodule DirGraph.Dream do
         {0, 0}
       else
         Logger.debug("[Dream] Enriching #{length(batch)} node(s)")
+
         Task.async_stream(
           batch,
           fn {node_id, graph} -> do_enrich(node_id, graph, cfg) end,
           max_concurrency: concurrency,
-          timeout:         @ollama_timeout,
-          on_timeout:      :kill_task
+          timeout: @ollama_timeout,
+          on_timeout: :kill_task
         )
         |> Enum.reduce({0, 0}, fn
-          {:ok, {:ok, _}},    {ok, err} -> {ok + 1, err}
+          {:ok, {:ok, _}}, {ok, err} -> {ok + 1, err}
           {:ok, {:error, _}}, {ok, err} -> {ok, err + 1}
-          {:exit, _},         {ok, err} -> {ok, err + 1}
+          {:exit, _}, {ok, err} -> {ok, err + 1}
         end)
       end
 
     schedule_tick()
-    {:noreply, %{state |
-      queue:     remaining_queue,
-      processed: state.processed + n_ok,
-      errors:    state.errors + n_err
-    }}
+
+    {:noreply,
+     %{
+       state
+       | queue: remaining_queue,
+         processed: state.processed + n_ok,
+         errors: state.errors + n_err
+     }}
   end
 
   # ----------------------------------------------------------------
@@ -206,7 +215,9 @@ defmodule DirGraph.Dream do
 
           case call_ollama(prompt, cfg) do
             {:ok, enrichment} ->
-              enrichment = Map.put(enrichment, "enriched_at", DateTime.utc_now() |> DateTime.to_iso8601())
+              enrichment =
+                Map.put(enrichment, "enriched_at", DateTime.utc_now() |> DateTime.to_iso8601())
+
               EnrichmentStore.put(node_id, enrichment)
               Neo4j.update_enrichment(node_id, enrichment)
               re_embed(node_id, meta, enrichment)
@@ -243,11 +254,11 @@ defmodule DirGraph.Dream do
   end
 
   defp call_ollama(prompt, cfg) do
-    url   = Map.get(cfg, "url",   "http://localhost:11434")
+    url = Map.get(cfg, "url", "http://localhost:11434")
     model = Map.get(cfg, "model", "qwen3:8b")
 
     body = %{
-      model:  model,
+      model: model,
       prompt: prompt,
       stream: false,
       options: %{temperature: 0.1}
@@ -323,7 +334,7 @@ defmodule DirGraph.Dream do
     Enum.reduce_while(1..n, {[], queue}, fn _, {batch, q} ->
       case :queue.out(q) do
         {{:value, item}, rest} -> {:cont, {[item | batch], rest}}
-        {:empty, _}            -> {:halt, {batch, q}}
+        {:empty, _} -> {:halt, {batch, q}}
       end
     end)
     |> then(fn {batch, q} -> {Enum.reverse(batch), q} end)
@@ -331,24 +342,28 @@ defmodule DirGraph.Dream do
 
   defp read_source(%{file: file, line: line} = meta) when is_binary(file) do
     end_line = Map.get(meta, :end_line, line)
+
     case File.read(file) do
       {:ok, content} ->
         content
         |> String.split("\n")
         |> Enum.slice((line - 1)..(end_line - 1))
         |> Enum.join("\n")
-      _ -> ""
+
+      _ ->
+        ""
     end
   end
+
   defp read_source(_), do: ""
 
   defp enriched_node_text(meta, enrichment) do
-    type    = Map.get(meta, :type, "node")
-    name    = Map.get(meta, :name, "")
+    type = Map.get(meta, :type, "node")
+    name = Map.get(meta, :name, "")
     summary = Map.get(enrichment, "summary", "")
-    domain  = Map.get(enrichment, "domain", "")
-    tags    = Map.get(enrichment, "tags", []) |> Enum.join(", ")
-    source  = read_source(meta)
+    domain = Map.get(enrichment, "domain", "")
+    tags = Map.get(enrichment, "tags", []) |> Enum.join(", ")
+    source = read_source(meta)
 
     "#{type} #{name}\n#{summary}\ndomain: #{domain}, tags: #{tags}\n#{source}"
   end
@@ -356,11 +371,15 @@ defmodule DirGraph.Dream do
   defp schedule_tick, do: Process.send_after(self(), :tick, @tick_ms)
 
   defp load_config do
-    with true          <- File.exists?(@config_path),
-         {:ok, raw}    <- File.read(@config_path),
+    with true <- File.exists?(@config_path),
+         {:ok, raw} <- File.read(@config_path),
          {:ok, decoded} <- Jason.decode(raw) do
       cfg = Map.get(decoded, "dream", %{})
-      Map.merge(%{"model" => "qwen3:8b", "concurrency" => 4, "url" => "http://localhost:11434"}, cfg)
+
+      Map.merge(
+        %{"model" => "qwen3:8b", "concurrency" => 4, "url" => "http://localhost:11434"},
+        cfg
+      )
     else
       _ -> %{"model" => "qwen3:8b", "concurrency" => 4, "url" => "http://localhost:11434"}
     end

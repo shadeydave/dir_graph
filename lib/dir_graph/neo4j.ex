@@ -48,7 +48,7 @@ defmodule DirGraph.Neo4j do
       Neo4j.query("MATCH (n:ASTNode {project: $p}) RETURN n", %{p: "dir_graph"})
   """
   def query(cypher, params \\ %{}) do
-    url  = base_url() <> "/db/neo4j/tx/commit"
+    url = base_url() <> "/db/neo4j/tx/commit"
     body = %{statements: [%{statement: cypher, parameters: params}]}
 
     case Req.post(url, json: body, auth: {:basic, auth()}, receive_timeout: 30_000) do
@@ -164,7 +164,9 @@ defmodule DirGraph.Neo4j do
   def health_check do
     case ping() do
       :ok ->
-        case query("CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition") do
+        case query(
+               "CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition"
+             ) do
           {:ok, [%{"versions" => [version | _], "edition" => edition} | _]} ->
             {:ok, %{status: "connected", version: version, edition: edition, url: base_url()}}
 
@@ -191,11 +193,11 @@ defmodule DirGraph.Neo4j do
       CG.all_nodes(graph)
       |> Enum.map(fn n ->
         %{
-          "node_id" => to_string(n[:id]   || ""),
-          "type"    => to_string(n[:type] || ""),
-          "name"    => to_string(n[:name] || ""),
-          "file"    => to_string(n[:file] || ""),
-          "line"    => n[:line] || 0
+          "node_id" => to_string(n[:id] || ""),
+          "type" => to_string(n[:type] || ""),
+          "name" => to_string(n[:name] || ""),
+          "file" => to_string(n[:file] || ""),
+          "line" => n[:line] || 0
         }
       end)
 
@@ -232,6 +234,7 @@ defmodule DirGraph.Neo4j do
     MATCH (n:ASTNode {node_id: $node_id, project: $project})
     SET n.embedding = $embedding
     """
+
     case query(cypher, %{node_id: node_id, project: project, embedding: embedding}) do
       {:ok, _} -> :ok
       err -> err
@@ -251,17 +254,20 @@ defmodule DirGraph.Neo4j do
         n.complexity  = $complexity,
         n.enriched_at = $enriched_at
     """
+
     params = %{
-      node_id:     node_id,
-      summary:     Map.get(enrichment, "summary", ""),
-      domain:      Map.get(enrichment, "domain", ""),
-      tags:        Map.get(enrichment, "tags", []),
-      complexity:  Map.get(enrichment, "complexity", ""),
+      node_id: node_id,
+      summary: Map.get(enrichment, "summary", ""),
+      domain: Map.get(enrichment, "domain", ""),
+      tags: Map.get(enrichment, "tags", []),
+      complexity: Map.get(enrichment, "complexity", ""),
       enriched_at: Map.get(enrichment, "enriched_at", "")
     }
+
     case query(cypher, params) do
       {:ok, _} -> :ok
-      _ -> :ok   # Neo4j optional — silently skip if not running
+      # Neo4j optional — silently skip if not running
+      _ -> :ok
     end
   end
 
@@ -271,6 +277,7 @@ defmodule DirGraph.Neo4j do
     MATCH (n:ASTNode {project: $project, file: $file})
     DETACH DELETE n
     """
+
     case query(cypher, %{project: project, file: file_path}) do
       {:ok, _} -> :ok
       err -> err
@@ -313,6 +320,7 @@ defmodule DirGraph.Neo4j do
       MATCH (tgt:ASTNode {node_id: e.target, project: $project})
       MERGE (src)-[:#{rel} {project: $project}]->(tgt)
       """
+
       case query(cypher, %{edges: batch, project: project}) do
         {:ok, _} -> {:cont, :ok}
         err -> {:halt, err}
@@ -333,11 +341,12 @@ defmodule DirGraph.Neo4j do
       {:ok, hits} = Neo4j.semantic_search(embedding_vector, top_k: 10)
   """
   def semantic_search(embedding, opts \\ []) do
-    top_k   = Keyword.get(opts, :top_k, 10)
-    project = Keyword.get(opts, :project)   # nil = all projects
+    top_k = Keyword.get(opts, :top_k, 10)
+    # nil = all projects
+    project = Keyword.get(opts, :project)
 
-    filter  = if project, do: "WHERE n.project = $project", else: ""
-    params  = %{embedding: embedding, top_k: top_k, project: project}
+    filter = if project, do: "WHERE n.project = $project", else: ""
+    params = %{embedding: embedding, top_k: top_k, project: project}
 
     cypher = """
     CALL db.index.vector.queryNodes('node_embeddings', $top_k, $embedding)

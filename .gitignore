@@ -22,3 +22,13 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 concept_net-*.tar
 
+# Compiled escript CLI binary
+/dir_graph
+
+# User & Session runtime files under .dir_graph
+.dir_graph/session_plan.json
+.dir_graph/session_plan.draft.json
+.dir_graph/content_nodes.json
+
+# OS specific files
+.DS_Store

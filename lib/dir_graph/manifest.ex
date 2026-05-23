@@ -40,22 +40,26 @@ defmodule DirGraph.Manifest do
   Returns `%{new: [...], modified: [...], deleted: [...]}` — the minimal set
   of operations needed to bring the graph in sync with disk.
   """
-  @spec diff(t(), [String.t()]) :: %{new: [String.t()], modified: [String.t()], deleted: [String.t()]}
+  @spec diff(t(), [String.t()]) :: %{
+          new: [String.t()],
+          modified: [String.t()],
+          deleted: [String.t()]
+        }
   def diff(old_manifest, current_paths) when is_map(old_manifest) do
     current = build(current_paths)
 
-    old_set     = MapSet.new(Map.keys(old_manifest))
+    old_set = MapSet.new(Map.keys(old_manifest))
     current_set = MapSet.new(Map.keys(current))
 
-    deleted  = old_set |> MapSet.difference(current_set) |> MapSet.to_list()
-    new      = current_set |> MapSet.difference(old_set) |> MapSet.to_list()
+    deleted = old_set |> MapSet.difference(current_set) |> MapSet.to_list()
+    new = current_set |> MapSet.difference(old_set) |> MapSet.to_list()
 
     modified =
       current
       |> Enum.filter(fn {path, entry} ->
         case Map.get(old_manifest, path) do
-          nil  -> false
-          old  -> old.mtime != entry.mtime or old.size != entry.size
+          nil -> false
+          old -> old.mtime != entry.mtime or old.size != entry.size
         end
       end)
       |> Enum.map(fn {path, _} -> path end)
@@ -81,7 +85,9 @@ defmodule DirGraph.Manifest do
             {:ok, entry} -> [{path, entry}]
             :error -> []
           end
-        _ -> []
+
+        _ ->
+          []
       end
     end)
     |> Enum.into(%{})

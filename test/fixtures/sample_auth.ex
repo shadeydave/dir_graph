@@ -3,7 +3,7 @@ defmodule SampleAuth do
 
   def login(email, password) do
     with {:ok, user} <- SampleUser.find_by_email(email),
-         true        <- verify_password(user, password) do
+         true <- verify_password(user, password) do
       {:ok, user}
     end
   end
@@ -11,7 +11,7 @@ defmodule SampleAuth do
   def verify_token(token) do
     case decode_jwt(token) do
       {:ok, claims} -> {:ok, claims}
-      _             -> {:error, :invalid_token}
+      _ -> {:error, :invalid_token}
     end
   end
 

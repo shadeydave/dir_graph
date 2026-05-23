@@ -53,14 +53,14 @@ defmodule DirGraph.VectorStoreTest do
 
   describe "search/2 — ordering" do
     test "returns results sorted by descending similarity" do
-      VectorStore.put("identical",   [1.0, 0.0, 0.0])
-      VectorStore.put("orthogonal",  [0.0, 1.0, 0.0])
-      VectorStore.put("opposite",    [-1.0, 0.0, 0.0])
+      VectorStore.put("identical", [1.0, 0.0, 0.0])
+      VectorStore.put("orthogonal", [0.0, 1.0, 0.0])
+      VectorStore.put("opposite", [-1.0, 0.0, 0.0])
 
       results = VectorStore.search([1.0, 0.0, 0.0], 3)
       ids = Enum.map(results, fn {id, _} -> id end)
 
-      assert hd(ids)        == "identical"
+      assert hd(ids) == "identical"
       assert List.last(ids) == "opposite"
     end
 

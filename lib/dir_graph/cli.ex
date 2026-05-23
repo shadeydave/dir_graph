@@ -26,7 +26,7 @@ defmodule DirGraph.CLI do
     opts
   end
 
-  def process([help: true]), do: print_help()
+  def process(help: true), do: print_help()
 
   def process(opts) do
     file = Keyword.get(opts, :file)

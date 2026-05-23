@@ -50,7 +50,7 @@ defmodule DirGraph.AttemptLedgerTest do
       AttemptLedger.record_attempt("slow_bug")
       result = AttemptLedger.record_attempt("slow_bug")
 
-      assert result.attempt  == 2
+      assert result.attempt == 2
       assert is_binary(result.message)
       assert result.message != nil
     end
@@ -59,7 +59,7 @@ defmodule DirGraph.AttemptLedgerTest do
       for _ <- 1..2, do: AttemptLedger.record_attempt("stuck_bug")
       result = AttemptLedger.record_attempt("stuck_bug")
 
-      assert result.attempt  == 3
+      assert result.attempt == 3
       assert String.length(result.message) > 0
     end
 
@@ -74,7 +74,7 @@ defmodule DirGraph.AttemptLedgerTest do
 
     test "attempt count increments correctly across multiple calls" do
       results = for _ <- 1..5, do: AttemptLedger.record_attempt("count_check")
-      counts  = Enum.map(results, & &1.attempt)
+      counts = Enum.map(results, & &1.attempt)
       assert counts == [1, 2, 3, 4, 5]
     end
   end
@@ -109,7 +109,7 @@ defmodule DirGraph.AttemptLedgerTest do
       result = AttemptLedger.record_attempt("flip_flop")
 
       assert result.recurrences == 1
-      assert result.attempt     == 1
+      assert result.attempt == 1
     end
 
     test "recurrence resets attempt count to 1" do
@@ -126,9 +126,10 @@ defmodule DirGraph.AttemptLedgerTest do
       result = AttemptLedger.record_attempt("flip_flop")
 
       assert is_binary(result.message)
+
       assert String.contains?(String.downcase(result.message), "recur") or
-             String.contains?(String.downcase(result.message), "regression") or
-             String.contains?(String.downcase(result.message), "flip")
+               String.contains?(String.downcase(result.message), "regression") or
+               String.contains?(String.downcase(result.message), "flip")
     end
 
     test "multiple recurrences are tracked" do

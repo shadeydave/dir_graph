@@ -4,6 +4,15 @@ export interface ASTNode {
   name: string
   file: string
   line: number
+  // Metadata
+  title?: string
+  description?: string
+  ref?: string
+  groups?: string[]   // multi-group membership
+  group?: string      // legacy single-group (normalized to groups on read)
+  // Group node sizing (stored so diffs preserve layout)
+  nodeWidth?: number
+  nodeHeight?: number
   // Annotation-specific
   body?: string
   targets?: string[]

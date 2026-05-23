@@ -25,19 +25,19 @@ defmodule DirGraph.LSP.ServerRegistry do
 
   # Built-in defaults. Keys are file extensions (including the dot).
   @defaults %{
-    ".js"  => {"typescript-language-server", ["--stdio"]},
+    ".js" => {"typescript-language-server", ["--stdio"]},
     ".jsx" => {"typescript-language-server", ["--stdio"]},
-    ".ts"  => {"typescript-language-server", ["--stdio"]},
+    ".ts" => {"typescript-language-server", ["--stdio"]},
     ".tsx" => {"typescript-language-server", ["--stdio"]},
-    ".py"  => {"pyright-langserver", ["--stdio"]},
-    ".rb"  => {"solargraph", ["stdio"]},
-    ".go"  => {"gopls", []},
-    ".rs"  => {"rust-analyzer", []},
+    ".py" => {"pyright-langserver", ["--stdio"]},
+    ".rb" => {"solargraph", ["stdio"]},
+    ".go" => {"gopls", []},
+    ".rs" => {"rust-analyzer", []},
     ".php" => {"intelephense", ["--stdio"]},
-    ".c"   => {"clangd", []},
-    ".h"   => {"clangd", []},
+    ".c" => {"clangd", []},
+    ".h" => {"clangd", []},
     ".cpp" => {"clangd", []},
-    ".cc"  => {"clangd", []},
+    ".cc" => {"clangd", []},
     ".cxx" => {"clangd", []},
     ".hpp" => {"clangd", []}
   }
@@ -49,19 +49,22 @@ defmodule DirGraph.LSP.ServerRegistry do
       description: "Symbol extraction and call hierarchy for JavaScript and TypeScript",
       extensions: [".js", ".jsx", ".ts", ".tsx"],
       install: "npm install -g typescript-language-server typescript",
-      notes: "Requires Node.js. Both packages are needed — typescript-language-server delegates to the TypeScript compiler."
+      notes:
+        "Requires Node.js. Both packages are needed — typescript-language-server delegates to the TypeScript compiler."
     },
     "pyright-langserver" => %{
       description: "Symbol extraction and call hierarchy for Python",
       extensions: [".py"],
       install: "npm install -g pyright",
-      notes: "Requires Node.js. Alternatively: pip install pyright (installs the same binary via PyPI wrapper)."
+      notes:
+        "Requires Node.js. Alternatively: pip install pyright (installs the same binary via PyPI wrapper)."
     },
     "solargraph" => %{
       description: "Symbol extraction and call hierarchy for Ruby",
       extensions: [".rb"],
       install: "gem install solargraph",
-      notes: "Requires Ruby gems. Run `solargraph download-core` after install for stdlib support."
+      notes:
+        "Requires Ruby gems. Run `solargraph download-core` after install for stdlib support."
     },
     "gopls" => %{
       description: "Symbol extraction and call hierarchy for Go",
@@ -73,19 +76,22 @@ defmodule DirGraph.LSP.ServerRegistry do
       description: "Symbol extraction and call hierarchy for Rust",
       extensions: [".rs"],
       install: "rustup component add rust-analyzer",
-      notes: "Requires rustup. If installed without rustup, download the binary from https://github.com/rust-lang/rust-analyzer/releases."
+      notes:
+        "Requires rustup. If installed without rustup, download the binary from https://github.com/rust-lang/rust-analyzer/releases."
     },
     "intelephense" => %{
       description: "Symbol extraction and call hierarchy for PHP",
       extensions: [".php"],
       install: "npm install -g intelephense",
-      notes: "Free tier covers all DirGraph features. A licence key unlocks additional IDE features but is not required here."
+      notes:
+        "Free tier covers all DirGraph features. A licence key unlocks additional IDE features but is not required here."
     },
     "clangd" => %{
       description: "Symbol extraction and call hierarchy for C and C++",
       extensions: [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp"],
       install: "xcode-select --install",
-      notes: "Already bundled with Xcode Command Line Tools on macOS. Alternatively: brew install llvm (gets a newer version)."
+      notes:
+        "Already bundled with Xcode Command Line Tools on macOS. Alternatively: brew install llvm (gets a newer version)."
     }
   }
 
@@ -151,11 +157,12 @@ defmodule DirGraph.LSP.ServerRegistry do
           hint = Map.get(@install_hints, cmd, %{})
 
           %{
-            server:      cmd,
-            extensions:  exts,
-            description: Map.get(hint, :description, "LSP server for #{Enum.join(exts, ", ")} files"),
-            install:     Map.get(hint, :install, "See documentation for #{cmd}"),
-            notes:       Map.get(hint, :notes)
+            server: cmd,
+            extensions: exts,
+            description:
+              Map.get(hint, :description, "LSP server for #{Enum.join(exts, ", ")} files"),
+            install: Map.get(hint, :install, "See documentation for #{cmd}"),
+            notes: Map.get(hint, :notes)
           }
           |> Enum.reject(fn {_k, v} -> is_nil(v) end)
           |> Enum.into(%{})

@@ -75,7 +75,7 @@ defmodule DirGraph.LSP.ImportExtractor do
     |> lines_with_numbers()
     |> Enum.flat_map(fn {line, n} ->
       cond do
-        m = Regex.run(@js_from,    line) -> [{:js_import, Enum.at(m, 1), file_path, n}]
+        m = Regex.run(@js_from, line) -> [{:js_import, Enum.at(m, 1), file_path, n}]
         m = Regex.run(@js_require, line) -> [{:js_import, Enum.at(m, 1), file_path, n}]
         true -> []
       end
@@ -89,11 +89,12 @@ defmodule DirGraph.LSP.ImportExtractor do
       case Regex.run(@py_relative, String.trim_leading(line)) do
         [_, dotted] ->
           case py_dots_to_path(dotted) do
-            nil  -> []
+            nil -> []
             path -> [{:py_import, path, file_path, n}]
           end
 
-        nil -> []
+        nil ->
+          []
       end
     end)
   end
@@ -120,13 +121,13 @@ defmodule DirGraph.LSP.ImportExtractor do
   # `.`         → bare dot (package init) → nil (skip)
 
   defp py_dots_to_path(dotted) do
-    dots  = dotted |> String.graphemes() |> Enum.take_while(&(&1 == ".")) |> length()
-    rest  = String.slice(dotted, dots, String.length(dotted))
+    dots = dotted |> String.graphemes() |> Enum.take_while(&(&1 == ".")) |> length()
+    rest = String.slice(dotted, dots, String.length(dotted))
 
     if rest == "" do
       nil
     else
-      ups         = String.duplicate("../", dots - 1)
+      ups = String.duplicate("../", dots - 1)
       module_path = String.replace(rest, ".", "/")
       "#{ups}#{module_path}"
     end

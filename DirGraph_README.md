@@ -280,21 +280,36 @@ Add this to `~/.claude/settings.json`:
 
 | Tool | Description |
 |---|---|
-| `query_code_graph` | Search for a concept by name. Returns a semantic slice with file + line per node. |
+| `query_code_graph` | Search for a concept by name. Returns a semantic slice with file + line per node. Supports `node_type` filter and `include_code` to embed source lines directly. |
 | `affected_by` | Find everything that would break if a given node changes (inbound BFS). |
-| `semantic_search` | Find nodes by meaning, not name. Requires embeddings backend. |
-| `workspace_stats` | Returns node/edge counts, `calls_edges` count, embeddings status, and `capability_gaps` (missing language servers with install commands). |
+| `semantic_search` | Natural-language search via vector embeddings. Default `detail="pointer"` returns compact routing nodes (~200 tokens). Use `detail="full"` only when you need the expanded subgraph. |
+| `workspace_stats` | Graph topology overview: node/edge counts by type, most-connected modules, embeddings coverage, watched dirs, and `capability_gaps` (missing LSP servers with install commands). |
+
+#### Source read tools
+
+These give surgical access to source lines without loading whole files. Use after `query_code_graph` identifies the node of interest.
+
+| Tool | Description |
+|---|---|
+| `get_node_source` | Return the exact source lines (`line`–`end_line`) for a single graph node. Far cheaper than `Read` on the whole file. |
+| `get_call_chain_source` | BFS-follow `CALLS` edges from a root node (up to `depth` hops), fetch source for each reachable project Function. Returns functions in BFS order. Skips stdlib and external stubs. |
+
+#### Code mutation tools
+
+| Tool | Description |
+|---|---|
+| `apply_diff` | Surgically mutate source files using graph node IDs as anchors. Actions: `replace` (single line), `replace_node` (full `line`–`end_line` range), `delete`, `insert_after`. Elixir files are syntax-checked before writing; graph is re-indexed on success. |
 
 #### Graph management tools
 
 | Tool | Description |
 |---|---|
-| `index_directory` | Index a directory into the in-memory graph. |
-| `index_file` | Index a single file into the in-memory graph. |
-| `load_graph` | Load a pre-compiled `.bin` graph (fast — use this at session start). |
+| `index_directory` | Index all source files in a directory recursively. Run once at session start. |
+| `index_file` | Index a single source file into the current graph. |
+| `load_graph` | Load a pre-compiled `.bin` graph (fast — use this at session start when a binary exists). |
 | `save_graph` | Persist the current in-memory graph to a `.bin` file. |
-| `sync_graph` | Diff the manifest against current disk state and re-index only changed files. |
-| `watch_directory` | Start a file-system watcher that keeps the graph live as files change. |
+| `sync_graph` | Diff the manifest against current disk state and re-index only changed files. Use after `load_graph` on a stale binary. |
+| `watch_directory` | Start a filesystem watcher that keeps the graph live as files are saved. |
 | `unwatch_directory` | Stop the watcher for a directory. |
 
 #### Content node tools
@@ -303,10 +318,10 @@ Non-code nodes that survive graph rebuilds. Use these to attach business rules, 
 
 | Tool | Description |
 |---|---|
-| `add_content_node` | Create a BusinessRule, Copy, Contract, or Domain node. |
-| `update_content_node` | Update content or metadata of an existing content node. |
-| `delete_content_node` | Remove a content node permanently. |
-| `find_implementations` | Find code nodes that implement a given content node. |
+| `add_content_node` | Create a `BusinessRule`, `Copy`, `Contract`, or `Domain` node and link it via `IMPLEMENTS` edges. |
+| `update_content_node` | Update content text and/or `IMPLEMENTS` links. All fields optional — only provided fields change. |
+| `delete_content_node` | Remove a content node from the graph and persistent store. |
+| `find_implementations` | Given a content node, return all code nodes it governs via `IMPLEMENTS` edges. |
 | `list_content_nodes` | List all content nodes, optionally filtered by type. |
 
 #### Process tools
@@ -315,11 +330,13 @@ Spawn and monitor long-running OS processes (build servers, test runners, dev se
 
 | Tool | Description |
 |---|---|
-| `spawn_process` | Start a named OS process and begin buffering its output. |
-| `list_processes` | List all running managed processes and their status. |
-| `read_output` | Read buffered output from a process (ring buffer, last 500 lines). |
-| `tail_output` | Stream new output lines from a process since a given cursor. |
-| `stop_process` | Stop a managed process by name. |
+| `spawn_process` | Start a named OS process and begin buffering its output. Accepts `cwd` and `label` (shown in Activity Monitor). |
+| `list_processes` | List all monitored processes with status and last output line. |
+| `read_output` | Read the last N lines from a named process (ring buffer, max 500 lines). |
+| `tail_output` | Return only lines produced since `cursor`. Use the returned `next_cursor` on each call to receive only new output — cost proportional to new lines only. |
+| `stop_process` | Stop a managed process and remove it from the registry. |
+
+⚠️ **Self-recompile caveat**: if DirGraph is the target project (i.e. you run `mix test` on the DirGraph repo itself via `spawn_process`), the test run recompiles and restarts the MCP server, closing the stdio connection. Use `mix test` directly for the DirGraph repo; `spawn_process` is safe for all other projects.
 
 #### Attempt ledger tools
 
@@ -327,23 +344,51 @@ Tracks LLM mutation attempts per problem key to detect flip-flop loops and diagn
 
 | Tool | Description |
 |---|---|
-| `record_attempt` | Record a fix attempt for a problem key. Accepts an optional `diagnostic` string (test output, error message) whose fingerprint is compared against the previous attempt — if the same error recurs despite different code, a targeted "wrong mental model" warning fires before the count-based thresholds. |
-| `resolve_problem` | Mark a problem as resolved, clearing its active attempt counter while retaining history for recurrence detection. |
-| `list_problems` | List all open (unresolved) problem keys sorted by attempt count descending. |
+| `record_attempt` | Record a fix attempt before each change. Accepts `diagnostic` (test output, error message) — fingerprinted against the previous attempt to detect "different code, same error" early. |
+| `resolve_problem` | Mark a problem resolved. If it recurs later, `record_attempt` flags it as a regression. |
+| `list_problems` | List all open problems sorted by attempt count — spot what is stuck. |
 | `reset_ledger` | Clear all attempt history for the session. |
 
 #### Test selection tools
 
 | Tool | Description |
 |---|---|
-| `find_tests` | Given a function or module name, runs an inbound BFS (`affected_by`) to depth 3 and filters the result to nodes in test/spec directories. Returns each test's name, file, line, and a ready-to-run shell command (supports Elixir/ExUnit, Ruby/RSpec, JS/TS/Jest, Go, Python/pytest, PHP/PHPUnit). |
+| `find_tests` | Inbound BFS (`affected_by`) filtered to test/spec directories. Returns each test's file, line, and a ready-to-run shell command (ExUnit, RSpec, Jest, pytest, PHPUnit, Go test). Note: tests that call the target via an intermediate public API (e.g. `Server.function_name`) are not surfaced — use depth=3 and query the intermediate node if needed. |
+
+#### Dream tools
+
+Dream is a background LLM enrichment engine that annotates every node in the graph with semantic metadata (summary, domain, tags, complexity) using a local LLM (default: Ollama).
+
+| Tool | Description |
+|---|---|
+| `dream_status` | Check enrichment progress: queue depth, enriched count, errors, paused state. |
+| `dream_enrich` | Force-enrich a specific node immediately, bypassing the queue. Returns: `summary`, `domain`, `tags`, `complexity`. Useful before `semantic_search` or when you need to understand a specific node right now. |
+
+#### Visual collaboration tools
+
+The DirGraph viewer is a React + XYFlow graph editor for negotiating architectural changes visually. Start it with `cd viewer && npm run dev`.
+
+| Tool | Description |
+|---|---|
+| `export_to_viewer` | Export the current in-memory graph as JSON to `~/sites/diffs/{project}/` and open the viewer in the browser. Run `index_directory` first. |
+| `submit_viewer_diff` | Append an AI-authored diff to the viewer's diff ledger. Viewer polls every 2 s — diff appears automatically with a notification badge. Supports `added_nodes`, `removed_nodes`, `added_edges`, `removed_edges`, `annotations`. |
+
+#### Neo4j / cross-project tools
+
+DirGraph can sync graphs to a dedicated Neo4j 5 container for persistent storage and cross-project semantic search. Start it with `docker compose up -d`.
+
+| Tool | Description |
+|---|---|
+| `neo4j_health` | Check whether the DirGraph Neo4j container is running. Returns version, edition, and the exact `docker compose` command if unreachable. |
+| `neo4j_setup_schema` | Initialize Neo4j schema: project constraints, AST node/edge indexes, and vector index. Idempotent — safe to run multiple times. Run once after starting a fresh container. |
+| `cross_project_search` | Semantic search across **all** projects stored in Neo4j by vector similarity. Each result includes project name, node type/name, file, line, and similarity score. Use to find prior solutions across repos. |
 
 #### Planning tools
 
 | Tool | Description |
 |---|---|
-| `propose_session_plan` | Declare the minimum tools and paths needed for a task. Writes a draft for human review. |
-| `approve_session_plan` | Activate the approved draft, restricting the session to declared scope. |
+| `propose_session_plan` | Declare the minimum tools and paths needed for a task. Writes a draft for user review. The plan can only restrict the static allowlist, never expand it. |
+| `approve_session_plan` | Activate the draft, restricting the session to declared scope. |
 | `revoke_session_plan` | Clear the active plan and restore the full static allowlist. |
 
 ### Recommended workflow for Claude Code
@@ -351,11 +396,11 @@ Tracks LLM mutation attempts per problem key to detect flip-flop loops and diagn
 At the start of any session on a project with a pre-built graph:
 
 ```
-1. load_graph("/path/to/project.bin")
-2. workspace_stats()                     ← confirms what's loaded; check calls_edges
-                                           and capability_gaps before doing any analysis
-3. query_code_graph("login")             ← before reading any file
-4. Read file at returned file + line     ← targeted, not whole file
+1. load_graph("/path/to/project.bin")       or   index_directory("/path/to/project")
+2. workspace_stats()                     ← check calls_edges and capability_gaps first
+3. dream_status()                        ← how many nodes are enriched (optional)
+4. query_code_graph("login")             ← before reading any file
+5. get_node_source("<node_id>")          ← read only that node's lines, not the whole file
 ```
 
 If `workspace_stats` shows `calls_edges: 0` alongside Function nodes, call hierarchy
@@ -365,22 +410,35 @@ via `spawn_process`. After installation, call `sync_graph` to rebuild with call 
 For exploratory queries where you don't know the exact name:
 
 ```
-1. semantic_search("user authentication flow")   ← finds relevant entry nodes
-2. query_code_graph("<returned node id>")        ← BFS from there
+1. semantic_search("user authentication flow", top_k: 2)   ← keep top_k small (≤3)
+2. query_code_graph("<returned node id>")                  ← BFS from the best seed
 ```
+
+⚠️ `semantic_search` with `top_k ≥ 5` and `depth=2` can return 10,000+ tokens on a
+real codebase — BFS from each seed multiplies the output. Prefer `top_k=2` for an
+initial pass and follow up with `query_code_graph` on the best result.
 
 When editing a function and wanting surgical regression coverage:
 
 ```
 1. find_tests("function_name")                  ← get the minimal test set
 2. spawn_process("tests", command)              ← run the targeted tests
-3. read_output("tests")                         ← capture results
+3. tail_output("tests", cursor: 0)             ← stream output as it arrives
 4. record_attempt("function_name", <output>)    ← fingerprint-tracked attempt
 ```
 
 If `record_attempt` returns a `same_error` warning, the diagnostic fingerprint matched
-the previous attempt — the root cause analysis is likely wrong. Re-read the affected_by
+the previous attempt — the root cause analysis is likely wrong. Re-read the `affected_by`
 slice and reconsider before trying again.
+
+When making a targeted code change:
+
+```
+1. query_code_graph("function_name")           ← get the node ID
+2. get_node_source("<node_id>")               ← read current source (~50 tokens vs 10k+ for full file)
+3. apply_diff(file_path, mutations)            ← mutate using node ID as anchor
+4. index_file(file_path)                      ← re-index after the edit
+```
 
 ---
 
@@ -562,6 +620,31 @@ Content nodes are persisted to `.dir_graph/content_nodes.json` and reloaded auto
 
 ---
 
+## Dream — Background LLM Enrichment
+
+Dream is a GenServer that runs in the background after every `index_directory` or `index_file`, annotating each graph node with semantic metadata using a local LLM.
+
+For each node, Dream asks the LLM for:
+- **`summary`** — one sentence describing what this function/module does
+- **`domain`** — the business domain it belongs to (e.g. `"authentication"`, `"billing"`)
+- **`tags`** — free-form semantic labels (`["validation", "idempotent", "side-effect-free"]`)
+- **`complexity`** — an assessment of the implementation complexity
+
+This metadata improves `semantic_search` quality: nodes with enriched summaries produce better embeddings, and the domain/tag fields allow future filtered search (e.g. "find all nodes tagged `rate-limiting`").
+
+```
+dream_status()
+→ { dreaming: true, queue_depth: 601, enriched: 0, errors: 0, paused: false }
+
+dream_enrich("Function:authenticate/2:L45:lib/auth.ex")
+→ { summary: "Validates credentials and returns a session token or error.",
+    domain: "authentication", tags: ["session", "security"], complexity: "low" }
+```
+
+Dream runs at low priority in the background — it does not block indexing or queries. The queue drains over the lifetime of a session. Check `workspace_stats` for `embeddings_ready` to see how many nodes have been embedded so far.
+
+---
+
 ## Configuration
 
 Create `.dir_graph/mcp_config.json` in the project root:
@@ -573,6 +656,9 @@ Create `.dir_graph/mcp_config.json` in the project root:
     "affected_by",
     "semantic_search",
     "workspace_stats",
+    "get_node_source",
+    "get_call_chain_source",
+    "apply_diff",
     "load_graph",
     "index_directory",
     "index_file",
@@ -596,7 +682,15 @@ Create `.dir_graph/mcp_config.json` in the project root:
     "reset_ledger",
     "propose_session_plan",
     "approve_session_plan",
-    "revoke_session_plan"
+    "revoke_session_plan",
+    "find_tests",
+    "dream_status",
+    "dream_enrich",
+    "export_to_viewer",
+    "submit_viewer_diff",
+    "neo4j_health",
+    "neo4j_setup_schema",
+    "cross_project_search"
   ],
   "allowed_paths": [
     "/path/to/your/project"
@@ -656,13 +750,20 @@ dir_graph/
       manifest.ex       — File mtime/size tracking for incremental re-indexing
       watcher.ex        — FileSystem watcher for live graph updates
       weaver.ex         — Applies LLM-generated diffs back to source files (w/ syntax check)
+      dream.ex          — Background LLM enrichment engine: annotates nodes with summary,
+                          domain, tags, complexity via local LLM (Ollama). Runs as a
+                          GenServer; processes queue in the background after indexing.
       planner.ex        — Scaffolds new graphs from JSON plan definitions
       embeddings.ex     — HTTP client for Ollama / OpenAI embedding backends
       vector_store.ex   — ETS-backed cosine similarity store
       rag.ex            — GraphRAG orchestration: index nodes, semantic search
+      neo4j.ex          — Neo4j 5 Bolt client: dual-writes graph nodes/edges on index,
+                          stores embeddings as vector properties, exposes semantic_search
+                          across all persisted projects (cross_project_search)
       content_store.ex  — Persists content nodes to JSON, survives graph rebuilds
       attempt_ledger.ex — Tracks repeated LLM mutation attempts to detect flip-flop loops
-      process_monitor.ex — Monitors indexer/watcher processes
+      process_monitor.ex — Spawns and monitors OS processes; ring-buffers stdout/stderr;
+                           tail_output implements a cursor-based poll for streaming output
       lsp/
         client.ex       — Synchronous LSP client over stdio; open/fetch/close lifecycle;
                           documentSymbol + callHierarchy/outgoingCalls
@@ -719,6 +820,30 @@ BFS is fast enough that depth capping is a correctness concern (token explosion)
 | `format_for_llm` depth=2 (9 nodes) | ~620 |
 | `format_for_llm` depth=3 (13 nodes) | ~3,300 |
 | Full raw source (same codebase) | 13,000+ |
+
+### DirGraph vs stock Claude Code tools — token usage
+
+Measured against the DirGraph codebase itself (2,194 nodes, 2,181 edges, `analyzer.ex` at ~10,000 tokens):
+
+| Query | Tool | Output (chars) | Est. tokens | Notes |
+|---|---|---|---|---|
+| Known function — structural context | `query_code_graph("extract_slice", depth=2)` | ~6,200 | ~1,550 | 24 nodes, full call graph, one call |
+| Known function — source only | `get_node_source("<node_id>")` | ~300 | ~75 | Exact lines only, no call graph |
+| Known function — call chain source | `get_call_chain_source("<node_id>", depth=2)` | ~2,000–4,000 | ~500–1,000 | Source for root + all callees |
+| Known function — stock approach | Grep on specific file + `Read` with offset | ~200 | ~50 | Surgical, but no call graph context |
+| Impact analysis | `affected_by("index_directory")` | ~1,100 | ~275 | 3 nodes for single-caller case |
+| Full file | `Read("analyzer.ex")` | >40,000 | >10,000 | Hit token limit; not possible |
+| Unknown concept — pointer (new default) | `semantic_search("authentication", top_k=5)` | **~800** | **~200** | Routing pointers + Dream summaries; follow up with query_code_graph |
+| Unknown concept — full (explicit) | `semantic_search("authentication", top_k=3, detail="full")` | 121,377 | ~30,000 | BFS expansion; use only when you need the whole subgraph |
+| Unknown concept — stock approach | Grep project + Read (3–5 calls) | ~3,000–8,000 | ~750–2,000 | Multiple calls; no graph structure |
+
+**Key takeaways:**
+
+- `semantic_search` (pointer mode) is now the cheapest entry point for unknown-concept queries — ~200 tokens to get routing nodes, then follow up with `query_code_graph` or `get_node_source` on the best match.
+- `get_node_source` is the most token-efficient way to read code when you have a node ID — ~75 tokens vs >10,000 for a full file `Read`. Always prefer it over `Read` once you have a node ID.
+- `query_code_graph` is the right default for "I need structural context on X" — one call gives you the call graph, callers, and file/line for every related node.
+- `affected_by` is naturally bounded — its size reflects the real blast radius. A small return means low blast radius, not a missing result.
+- `semantic_search detail="full"` can still exceed 120,000 chars — it's now an explicit opt-in, not the default. See the [Call node noise](#call-node-noise-in-slice-output-next-priority) improvement for why full-mode slices are still larger than they need to be.
 
 ### Vector search (cosine similarity)
 
@@ -797,15 +922,105 @@ This loop fits comfortably inside 3,000 tokens of LLM context and operates entir
 
 ## Areas for Improvement
 
-These are known limitations that would need to be addressed for production use at scale.
+Ranked by impact on "works well regardless of codebase size."
 
-### Vector search performance
+### ✅ `semantic_search` output explosion — resolved 2026-03-24
 
-The linear cosine scan (768-dim, pure Elixir) takes ~700 ms regardless of corpus size. For codebases over ~5,000 functions, this becomes noticeable. Options:
+**Was:** default `semantic_search(top_k=3, depth=2)` → 89,000–121,000 chars (~22,000–30,000 tokens). BFS expansion from K seeds was uncapped.
 
-- **Nx + EXLA**: Batch matrix multiply for cosine similarity (BLAS-accelerated, 10-100x faster)
-- **HNSWlib NIF**: Approximate nearest neighbor index (sub-millisecond at millions of vectors)
-- **External ANN service**: Qdrant or Weaviate as sidecar (adds ops complexity)
+**Fix:** tiered `detail` parameter. `"pointer"` (new default) skips BFS entirely and returns compact routing nodes with Dream summaries — ~800 chars / ~200 tokens. `"full"` preserves the original BFS behavior for cases where you explicitly want the expanded subgraph.
+
+**Remaining:** `detail="full"` still produces 120,000+ chars with `top_k=3`. Cap `top_k ≤ 2` if using full mode.
+
+---
+
+### ✅ Call node noise in slice output — resolved 2026-03-24
+
+**Was:** Call nodes were **70% of the graph** (1,548 of 2,211 on the DirGraph codebase). They represent call *sites* — the specific line where a function is invoked. Example: `Call:Keyword.get:L336:lib/neo4j.ex`. They are not actionable and their information is already present on the parent Function node via the `calls: []` onion-skin array. At depth=2 on a large codebase, hundreds of Call stubs could appear in a single slice.
+
+**Fix:** `filter_calls: true` default in `format_for_llm`. Call nodes are dropped and edges where either endpoint is a Call node are filtered. Expose `include_calls: true` opt-in via `query_code_graph` for cases where exact call-site line numbers matter.
+
+**Measured impact:** `query_code_graph("extract_slice")` dropped from 26 nodes → 23 nodes. `DirGraph.Server` module query: 0 Call nodes in 63-node result. Verified live 2026-03-24.
+
+---
+
+### ✅ Absolute paths in formatted output — resolved 2026-03-24
+
+**Was:** every node in `format_for_llm` output carried the full absolute file path in the `file` field. In a 24-node slice with 23 edges, the cwd prefix repeated ~47 times = ~3,100 chars of pure overhead.
+
+**Fix:** `Path.relative_to_cwd/1` applied to the `file` field in `format_for_llm`. Node IDs remain absolute (stable keys for `get_node_source`, `apply_diff`). Output now shows `lib/dir_graph/analyzer.ex` instead of `/Users/codesquid/sites/squid_tools/dir_graph/lib/dir_graph/analyzer.ex`.
+
+**Measured impact:** ~20–25% reduction on typical slice output. Verified live 2026-03-24.
+
+---
+
+### ✅ Hub node BFS explosion — resolved 2026-03-24
+
+**Was:** no degree check before BFS expansion. A hub node (`DirGraph.Server`, degree 62) at depth=2 would pull in essentially the entire graph.
+
+**Fix:** `@hub_degree_threshold 30` guard in `Server.extract_slice`. If seed degree > 30 and requested depth > 1, auto-caps to depth=1 and adds `_hub_warning` to the payload. Verified live: `query_code_graph("DirGraph.Server")` triggers the guard (degree 65 > 30), returns 63 nodes with warning instead of thousands. Threshold is a module attribute — move to `mcp_config.json` if tuning is needed.
+
+---
+
+### Vector search performance ceiling
+
+**Impact: critical above ~10k nodes. Effort: medium.**
+
+The VectorStore is a pure-Elixir linear scan — cosine similarity computed sequentially across every stored vector. Measured at ~700ms for 2,191 vectors (768-dim). This is nearly flat up to ~5k vectors, then climbs:
+
+| Corpus size | Estimated query time |
+|---|---|
+| 2,000 nodes | ~700 ms (measured) |
+| 10,000 nodes | ~3.5 s |
+| 50,000 nodes | ~18 s |
+| 200,000 nodes | ~70 s |
+
+At 50k nodes (a mid-size production monorepo), `semantic_search` becomes unusable.
+
+**Fix options:**
+- **Nx + EXLA**: batch matrix multiply for cosine similarity — BLAS-accelerated, ~10–100x faster. Keeps everything in-process.
+- **HNSWlib NIF**: approximate nearest neighbor index — sub-millisecond at millions of vectors.
+- **External ANN service**: Qdrant or Weaviate as sidecar (adds ops complexity but supports billion-scale).
+
+---
+
+### ✅ `semantic_search` pointer quality without Dream enrichment — resolved 2026-03-24
+
+**Was:** when Dream had not yet enriched a node, the pointer response carried only `name`, `type`, `file`, `line`, and `score`. No content signal — just names and similarity scores.
+
+**Fix:** when `EnrichmentStore.get(node_id)` returns `nil` in pointer mode, fall back to the first ~100 chars of the function's source as a `preview` field (`source_preview/2` in `Server`). Costs one `File.read` slice per pointer. Gives the LLM routing signal without requiring Dream enrichment.
+
+---
+
+### Dream enrichment queue priority
+
+**Impact: medium. Effort: low.**
+
+Dream processes the enrichment queue in FIFO order. On a large codebase (50k+ nodes), the most-queried functions may be near the end of the queue and remain unenriched for hours. The semantic search pointer quality stays poor until those nodes are covered.
+
+**Fix:** weight the queue by query frequency. Every `query_code_graph` or `get_node_source` call on a node increments a hot-counter in the Server state. Dream's tick callback sorts its batch by hot-counter descending before dispatching. Nodes you actually touch get enriched first; background nodes fill in later.
+
+---
+
+### Incremental LSP indexing
+
+**Impact: medium at scale. Effort: high.**
+
+`watch_directory` re-indexes the entire file on any change. For large files and slow LSP servers this is noticeable. True incremental indexing would:
+
+1. Remove only the nodes belonging to the changed file
+2. Re-parse and re-insert just that file's nodes
+3. Re-resolve cross-file edges (the hard part)
+
+This would make the watcher practical for large codebases where a full re-index takes seconds. The manifest + CONTAINS edge structure already supports step 1; the difficulty is step 3, since other files may hold CALLS edges into the changed file's nodes.
+
+---
+
+### Multi-project federated graph
+
+Currently one graph per server instance. A workspace with multiple repos (monorepo or microservices mesh) would benefit from a federated graph where cross-service CALLS edges are tracked across graph boundaries. The string-ID vertex model already supports this — it just needs a loader that can merge graphs without collision. Neo4j persistence is already multi-project; the in-memory graph layer is not.
+
+---
 
 ### Language coverage
 
@@ -817,19 +1032,6 @@ Known gaps:
 - **CALLS edges for callers (incoming)**: `callHierarchy/incomingCalls` is not queried at index time because it requires a fully-resolved workspace view that single-file indexing can't reliably provide. Incoming callers are instead derived at query time from the accumulated outgoing CALLS edges across all indexed files — which is accurate once all files are indexed, but incomplete during partial indexing.
 - **Type-level edges**: LSP `textDocument/typeDefinition` and `textDocument/implementation` could add richer type relationship edges for statically-typed languages (e.g. `IMPLEMENTS` edges from concrete types to interfaces in Go or TypeScript).
 
-### Incremental indexing
-
-The manifest tracks mtime/size changes but full re-indexing on change is the current behavior. True incremental indexing would:
-
-1. Remove only the nodes belonging to the changed file
-2. Re-parse and re-insert just that file's nodes
-3. Re-resolve cross-file edges
-
-This would make the watcher practical for large codebases where full re-index takes seconds.
-
-### Embedding freshness
-
-Embeddings are generated at index time and not re-generated when a function's body changes. A dirty-embedding flag per node, checked by the watcher, would keep the vector store consistent with the current source.
 
 ### Multi-project graphs
 
@@ -842,6 +1044,28 @@ Currently one graph per server instance. A workspace with multiple repos (a mono
 ### Authentication for MCP
 
 The MCP server runs over stdio with no authentication. For shared team use (e.g. a server shared across a development team), an auth layer and per-user session plans would be needed.
+
+---
+
+## Development Workflow
+
+### Picking up code changes in the MCP server
+
+The MCP server is a long-running BEAM process. After editing source files, `mix compile` updates the `.beam` files on disk but the running process has old module code in memory. Use `reload_code` to hot-load the changes without restarting:
+
+```bash
+# 1. Edit source files
+# 2. Compile (in a separate terminal — NOT via spawn_process on this repo)
+mix compile
+
+# 3. Hot-reload into the running server (via MCP tool call)
+reload_code   # reloads Analyzer, Server, Handler, Allowlist
+
+# 4. Re-index so new indexer/graph logic takes effect
+index_directory /path/to/project
+```
+
+> **Warning:** do not use `spawn_process("mix test")` or `spawn_process("mix compile")` on the DirGraph repo itself. Recompiling Elixir code in the same OS process that owns the stdio MCP connection will kill the server. Run `mix test` and `mix compile` in a separate terminal.
 
 ---
 

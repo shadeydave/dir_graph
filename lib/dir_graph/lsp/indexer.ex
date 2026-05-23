@@ -130,7 +130,9 @@ defmodule DirGraph.LSP.Indexer do
         file_name = Path.basename(file_path)
 
         graph = CG.add_node(graph, file_node_id, "File", file_name, %{path: file_path})
-        {graph, _symbol_refs} = SymbolMapper.symbols_to_graph(symbols, file_path, file_node_id, graph)
+
+        {graph, _symbol_refs} =
+          SymbolMapper.symbols_to_graph(symbols, file_path, file_node_id, graph)
 
         # Call hierarchy pass: outgoing CALLS edges + onion-skin metadata.
         # The file is still open, so prepareCallHierarchy requests are valid.
@@ -164,12 +166,15 @@ defmodule DirGraph.LSP.Indexer do
     child_positions = Enum.flat_map(children, &collect_positions(&1, file_path))
 
     if kind in @callable_kinds do
-      name     = Map.get(symbol, "name", "unknown")
-      lsp_line = get_in(symbol, ["selectionRange", "start", "line"]) ||
-                 get_in(symbol, ["range", "start", "line"]) || 0
+      name = Map.get(symbol, "name", "unknown")
+
+      lsp_line =
+        get_in(symbol, ["selectionRange", "start", "line"]) ||
+          get_in(symbol, ["range", "start", "line"]) || 0
+
       lsp_char = get_in(symbol, ["selectionRange", "start", "character"]) || 0
       dir_line = lsp_line + 1
-      node_id  = "Function:#{name}:L#{dir_line}:#{file_path}"
+      node_id = "Function:#{name}:L#{dir_line}:#{file_path}"
 
       [{node_id, lsp_line, lsp_char} | child_positions]
     else
@@ -182,32 +187,59 @@ defmodule DirGraph.LSP.Indexer do
   # link directly. Otherwise create a lightweight Call placeholder so the
   # edge still exists for `affected_by` and the onion-skin metadata.
   defp build_calls_edges(client, file_path, positions, graph) do
+    project_root = find_root(file_path)
+
     Enum.reduce(positions, {graph, client}, fn {caller_id, lsp_line, lsp_char}, {g, c} ->
       case Client.outgoing_calls(c, file_path, lsp_line, lsp_char) do
         {:ok, calls, c} ->
           g =
             Enum.reduce(calls, g, fn %{name: name, uri: target_uri, line: target_line}, g_acc ->
               target_file = uri_to_path(target_uri)
-              preferred_id = "Function:#{name}:L#{target_line}:#{target_file}"
 
-              {g_acc, target_id} =
-                if CG.get_label(g_acc, preferred_id) do
-                  {g_acc, preferred_id}
-                else
-                  call_id = "Call:#{name}:L#{target_line}:#{target_file}"
-                  {CG.add_node(g_acc, call_id, "Call", name, %{line: target_line, file: target_file}), call_id}
-                end
+              if external_target?(target_file, project_root) do
+                g_acc
+              else
+                preferred_id = "Function:#{name}:L#{target_line}:#{target_file}"
 
-              CG.add_edge(g_acc, caller_id, target_id, "CALLS")
+                {g_acc, target_id} =
+                  if CG.get_label(g_acc, preferred_id) do
+                    {g_acc, preferred_id}
+                  else
+                    call_id = "Call:#{name}:L#{target_line}:#{target_file}"
+
+                    {CG.add_node(g_acc, call_id, "Call", name, %{
+                       line: target_line,
+                       file: target_file
+                     }), call_id}
+                  end
+
+                CG.add_edge(g_acc, caller_id, target_id, "CALLS")
+              end
             end)
 
           {g, c}
 
         {:error, reason} ->
-          Logger.warning("call hierarchy failed for #{file_path} at position #{lsp_line}:#{lsp_char}: #{inspect(reason)}")
+          Logger.warning(
+            "call hierarchy failed for #{file_path} at position #{lsp_line}:#{lsp_char}: #{inspect(reason)}"
+          )
+
           {g, c}
       end
     end)
+  end
+
+  @excluded_dir_segments ~w(node_modules _build deps .git dist)
+
+  # Returns true if `target_file` should be excluded from the graph:
+  # outside the project root, or inside a known generated/vendor directory.
+  defp external_target?(target_file, project_root) do
+    abs = Path.expand(target_file)
+
+    not String.starts_with?(abs, project_root) or
+      Enum.any?(@excluded_dir_segments, fn seg ->
+        String.contains?(abs, "/#{seg}/")
+      end)
   end
 
   defp uri_to_path("file://" <> path), do: path

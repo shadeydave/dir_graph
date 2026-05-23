@@ -52,10 +52,12 @@ defmodule DirGraph.ProcessMonitor do
 
   @doc """
   Spawn `cmd` in `cwd`, register it under `name`, and start capturing output.
+  `label` is an optional human-readable description shown in `list_processes`
+  (and visible in Activity Monitor via PID cross-reference).
   Returns `{:ok, name}` or `{:error, reason}`.
   """
-  def spawn_process(name, cmd, cwd) do
-    GenServer.call(__MODULE__, {:spawn, name, cmd, cwd})
+  def spawn_process(name, cmd, cwd, label \\ nil) do
+    GenServer.call(__MODULE__, {:spawn, name, cmd, cwd, label})
   end
 
   @doc "Returns a summary list of all monitored processes."
@@ -94,7 +96,7 @@ defmodule DirGraph.ProcessMonitor do
   end
 
   @impl true
-  def handle_call({:spawn, name, cmd, cwd}, _from, state) do
+  def handle_call({:spawn, name, cmd, cwd, label}, _from, state) do
     if Map.has_key?(state.processes, name) do
       {:reply, {:error, {:name_taken, name}}, state}
     else
@@ -108,18 +110,27 @@ defmodule DirGraph.ProcessMonitor do
             {:cd, cwd}
           ])
 
+        os_pid =
+          case Port.info(port, :os_pid) do
+            {:os_pid, pid} -> pid
+            _ -> nil
+          end
+
         entry = %{
-          port:       port,
-          cmd:        cmd,
-          cwd:        cwd,
-          status:     :running,
-          buffer:     [],       # newest-first list of %{n, ts, text}
+          port: port,
+          cmd: cmd,
+          cwd: cwd,
+          label: label,
+          os_pid: os_pid,
+          status: :running,
+          # newest-first list of %{n, ts, text}
+          buffer: [],
           line_count: 0,
           started_at: DateTime.utc_now()
         }
 
         new_state = %{
-          processes:  Map.put(state.processes,  name, entry),
+          processes: Map.put(state.processes, name, entry),
           port_index: Map.put(state.port_index, port, name)
         }
 
@@ -135,13 +146,15 @@ defmodule DirGraph.ProcessMonitor do
     summary =
       Enum.map(state.processes, fn {name, entry} ->
         %{
-          name:        name,
-          cmd:         entry.cmd,
-          cwd:         entry.cwd,
-          status:      status_label(entry.status),
-          line_count:  entry.line_count,
-          started_at:  DateTime.to_iso8601(entry.started_at),
-          last_line:   entry.buffer |> List.first() |> then(& &1 && &1.text)
+          name: name,
+          label: entry.label,
+          os_pid: entry.os_pid,
+          cmd: entry.cmd,
+          cwd: entry.cwd,
+          status: status_label(entry.status),
+          line_count: entry.line_count,
+          started_at: DateTime.to_iso8601(entry.started_at),
+          last_line: entry.buffer |> List.first() |> then(&(&1 && &1.text))
         }
       end)
 
@@ -158,12 +171,14 @@ defmodule DirGraph.ProcessMonitor do
         lines = entry.buffer |> Enum.take(limit) |> Enum.reverse()
 
         result = %{
-          name:        name,
-          cmd:         entry.cmd,
-          status:      status_label(entry.status),
+          name: name,
+          label: entry.label,
+          os_pid: entry.os_pid,
+          cmd: entry.cmd,
+          status: status_label(entry.status),
           total_lines: entry.line_count,
-          started_at:  DateTime.to_iso8601(entry.started_at),
-          lines:       lines
+          started_at: DateTime.to_iso8601(entry.started_at),
+          lines: lines
         }
 
         {:reply, {:ok, result}, state}
@@ -185,9 +200,9 @@ defmodule DirGraph.ProcessMonitor do
           |> Enum.reverse()
 
         result = %{
-          name:        name,
-          status:      status_label(entry.status),
-          lines:       lines,
+          name: name,
+          status: status_label(entry.status),
+          lines: lines,
           next_cursor: entry.line_count
         }
 
@@ -205,7 +220,7 @@ defmodule DirGraph.ProcessMonitor do
         if entry.status == :running, do: Port.close(entry.port)
 
         new_state = %{
-          processes:  Map.delete(state.processes,  name),
+          processes: Map.delete(state.processes, name),
           port_index: Map.delete(state.port_index, entry.port)
         }
 
@@ -229,7 +244,7 @@ defmodule DirGraph.ProcessMonitor do
 
   def handle_info({port, {:exit_status, code}}, state) do
     case Map.get(state.port_index, port) do
-      nil  -> {:noreply, state}
+      nil -> {:noreply, state}
       name -> {:noreply, put_in(state, [:processes, name, :status], {:exited, code})}
     end
   end
@@ -260,17 +275,17 @@ defmodule DirGraph.ProcessMonitor do
 
       name ->
         entry = state.processes[name]
-        n     = entry.line_count + 1
-        line  = %{n: n, ts: System.system_time(:millisecond), text: text}
+        n = entry.line_count + 1
+        line = %{n: n, ts: System.system_time(:millisecond), text: text}
 
         new_buffer = [line | entry.buffer] |> Enum.take(@max_lines)
-        new_entry  = %{entry | buffer: new_buffer, line_count: n}
+        new_entry = %{entry | buffer: new_buffer, line_count: n}
 
         put_in(state, [:processes, name], new_entry)
     end
   end
 
-  defp status_label(:running),        do: "running"
-  defp status_label({:exited, 0}),    do: "exited:ok"
+  defp status_label(:running), do: "running"
+  defp status_label({:exited, 0}), do: "exited:ok"
   defp status_label({:exited, code}), do: "exited:#{code}"
 end

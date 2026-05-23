@@ -8,7 +8,7 @@ defmodule DirGraph.Weaver do
 
   @doc """
   Applies an LLM-generated mutation payload to a source file.
-  
+
   Expected `diff_payload` format:
   ```json
   {
@@ -39,17 +39,17 @@ defmodule DirGraph.Weaver do
       mutations
       |> Enum.map(fn mut ->
         node = get_node(graph, mut["node_id"])
-        line     = Map.get(node, :line)     || mut["line"]     || 1
+        line = Map.get(node, :line) || mut["line"] || 1
         end_line = Map.get(node, :end_line) || mut["end_line"] || line
 
         mut
         |> Map.put("line", line)
         |> Map.put("end_line", end_line)
       end)
-      |> Enum.sort_by(&(&1["line"]), :desc)
+      |> Enum.sort_by(& &1["line"], :desc)
 
     new_lines = execute_mutations(lines, sorted_mutations)
-    
+
     new_source = Enum.join(new_lines, "\n")
 
     case verify_syntax(file_path, new_source) do
@@ -67,15 +67,18 @@ defmodule DirGraph.Weaver do
     case Path.extname(file_path) do
       ext when ext in ~w(.ex .exs) ->
         case Code.string_to_quoted(source) do
-          {:ok, _} -> :ok
+          {:ok, _} ->
+            :ok
+
           {:error, {_meta, msg, token}} ->
             # Elixir 1.15+ returns msg as a {prefix, suffix} tuple; older versions
             # return a plain string. Normalise both to a printable string.
             str = fn
               v when is_binary(v) -> v
-              v when is_tuple(v)  -> v |> Tuple.to_list() |> Enum.join()
-              v                   -> inspect(v)
+              v when is_tuple(v) -> v |> Tuple.to_list() |> Enum.join()
+              v -> inspect(v)
             end
+
             {:error, str.(msg) <> str.(token)}
         end
 
@@ -86,12 +89,16 @@ defmodule DirGraph.Weaver do
 
   defp get_node(graph, node_id) do
     case DirGraph.Graph.get_label(graph, node_id) do
-      nil   -> raise "Node '#{node_id}' not found in graph. Was the graph indexed before calling apply_diff?"
-      label -> label
+      nil ->
+        raise "Node '#{node_id}' not found in graph. Was the graph indexed before calling apply_diff?"
+
+      label ->
+        label
     end
   end
 
   defp execute_mutations(lines, []), do: lines
+
   defp execute_mutations(lines, [mutation | rest]) do
     # Line numbers from AST are 1-indexed, Elixir lists are 0-indexed.
     # We must ensure target_idx is valid.
@@ -104,19 +111,19 @@ defmodule DirGraph.Weaver do
           [indentation] = Regex.run(~r/^\s*/, original_line) || [""]
           new_line = indentation <> mutation["new_code"]
           List.replace_at(lines, target_idx, new_line)
-          
+
         "replace_node" ->
           # Replaces an entire multi-line block from `line` to `end_line`
           end_idx = max(0, mutation["end_line"] - 1)
-          
+
           # Indentation is based on the first line of the targeted node
           [indentation] = Regex.run(~r/^\s*/, original_line) || [""]
-          
+
           # We expect the LLM to provide multi-line new_code without parent indent
-          indented_new_code = 
+          indented_new_code =
             mutation["new_code"]
             |> String.split("\n")
-            |> Enum.map(fn 
+            |> Enum.map(fn
               "" -> ""
               sub_line -> indentation <> sub_line
             end)
@@ -125,7 +132,7 @@ defmodule DirGraph.Weaver do
           # Slice out the old lines and insert the new single string
           prefix = Enum.take(lines, target_idx)
           suffix = Enum.drop(lines, end_idx + 1)
-          
+
           prefix ++ [indented_new_code] ++ suffix
 
         "delete" ->

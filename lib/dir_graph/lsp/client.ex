@@ -43,7 +43,9 @@ defmodule DirGraph.LSP.Client do
         client = %__MODULE__{port: port, next_id: 1, buffer: ""}
 
         case initialize(client, root_path) do
-          {:ok, client} -> {:ok, client}
+          {:ok, client} ->
+            {:ok, client}
+
           {:error, reason} ->
             if Port.info(port) != nil, do: Port.close(port)
             {:error, reason}
@@ -148,9 +150,10 @@ defmodule DirGraph.LSP.Client do
                 Enum.map(calls, fn call ->
                   to = Map.get(call, "to", %{})
                   lsp_target_line = get_in(to, ["selectionRange", "start", "line"]) || 0
+
                   %{
                     name: Map.get(to, "name", "unknown"),
-                    uri:  Map.get(to, "uri", ""),
+                    uri: Map.get(to, "uri", ""),
                     line: lsp_target_line + 1
                   }
                 end)

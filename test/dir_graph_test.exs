@@ -4,11 +4,11 @@ defmodule DirGraphTest do
   use ExUnit.Case, async: true
 
   test "application starts all supervised processes" do
-    assert Process.whereis(DirGraph.Server)        != nil
-    assert Process.whereis(DirGraph.Watcher)       != nil
+    assert Process.whereis(DirGraph.Server) != nil
+    assert Process.whereis(DirGraph.Watcher) != nil
     assert Process.whereis(DirGraph.ProcessMonitor) != nil
     assert Process.whereis(DirGraph.AttemptLedger) != nil
-    assert Process.whereis(DirGraph.VectorStore)   != nil
-    assert Process.whereis(DirGraph.RAG)           != nil
+    assert Process.whereis(DirGraph.VectorStore) != nil
+    assert Process.whereis(DirGraph.RAG) != nil
   end
 end

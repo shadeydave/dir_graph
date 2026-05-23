@@ -16,11 +16,11 @@ defmodule DirGraph.GraphTest do
       g = CG.new() |> CG.add_node("fn:login", "Function", "login", %{line: 10, file: "auth.ex"})
 
       label = CG.get_label(g, "fn:login")
-      assert label.type  == "Function"
-      assert label.name  == "login"
-      assert label.line  == 10
-      assert label.file  == "auth.ex"
-      assert label.id    == "fn:login"
+      assert label.type == "Function"
+      assert label.name == "login"
+      assert label.line == 10
+      assert label.file == "auth.ex"
+      assert label.id == "fn:login"
     end
 
     test "is a no-op when vertex ID already exists (libgraph semantics)" do
@@ -59,8 +59,8 @@ defmodule DirGraph.GraphTest do
         |> CG.add_edge("mod:Auth", "fn:login", "DEFINES")
 
       [edge] = Graph.edges(g)
-      assert edge.v1    == "mod:Auth"
-      assert edge.v2    == "fn:login"
+      assert edge.v1 == "mod:Auth"
+      assert edge.v2 == "fn:login"
       assert edge.label == "DEFINES"
     end
 
@@ -73,7 +73,7 @@ defmodule DirGraph.GraphTest do
         |> CG.add_edge("a", "b", "IMPORTS")
 
       labels = Graph.edges(g) |> Enum.map(& &1.label)
-      assert "CALLS"   in labels
+      assert "CALLS" in labels
       assert "IMPORTS" in labels
     end
   end

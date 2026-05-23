@@ -120,7 +120,9 @@ defmodule DirGraph.Watcher do
     # Cancel any existing timer for this path
     state =
       case Map.get(state.pending, path) do
-        nil -> state
+        nil ->
+          state
+
         ref ->
           Process.cancel_timer(ref)
           %{state | pending: Map.delete(state.pending, path)}

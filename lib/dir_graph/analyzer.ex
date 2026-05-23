@@ -23,14 +23,35 @@ defmodule DirGraph.Analyzer do
     term_lower = String.downcase(search_term)
     vertices = Graph.vertices(graph)
 
-    # 1. Substring match on vertex ID or label name
-    exact =
-      Enum.find(vertices, fn vid ->
+    # 1. Substring match on vertex ID or label name — prefer shorter (more specific) matches
+    #    so "AttemptLedger" picks DirGraph.AttemptLedger over DirGraph.AttemptLedgerTest.
+    matches =
+      Enum.filter(vertices, fn vid ->
         name = get_name(graph, vid)
 
         String.contains?(String.downcase(vid), term_lower) or
           String.contains?(String.downcase(name), term_lower)
       end)
+
+    exact =
+      case matches do
+        [] ->
+          nil
+
+        [one] ->
+          one
+
+        many ->
+          # Rank by: exact name match first, then shortest name (most specific)
+          many
+          |> Enum.sort_by(fn vid ->
+            name = get_name(graph, vid)
+            name_lower = String.downcase(name)
+            exact_bonus = if name_lower == term_lower, do: 0, else: 1
+            {exact_bonus, String.length(name)}
+          end)
+          |> List.first()
+      end
 
     if exact do
       exact
@@ -71,7 +92,9 @@ defmodule DirGraph.Analyzer do
   Depth is silently capped at #{@max_depth} regardless of the requested value.
   """
   def extract_slice(graph, start_vertex_id, depth \\ 2) do
-    collected = bfs(graph, [start_vertex_id], min(depth, @max_depth), MapSet.new([start_vertex_id]))
+    collected =
+      bfs(graph, [start_vertex_id], min(depth, @max_depth), MapSet.new([start_vertex_id]))
+
     Graph.subgraph(graph, MapSet.to_list(collected))
   end
 
@@ -81,7 +104,9 @@ defmodule DirGraph.Analyzer do
   Depth is silently capped at #{@max_depth}.
   """
   def affected_by(graph, start_vertex_id, depth \\ 2) do
-    collected = bfs_in(graph, [start_vertex_id], min(depth, @max_depth), MapSet.new([start_vertex_id]))
+    collected =
+      bfs_in(graph, [start_vertex_id], min(depth, @max_depth), MapSet.new([start_vertex_id]))
+
     Graph.subgraph(graph, MapSet.to_list(collected))
   end
 
@@ -106,8 +131,9 @@ defmodule DirGraph.Analyzer do
   """
   def format_for_llm(subgraph, opts \\ []) do
     include_types = Keyword.get(opts, :include_types, :all)
-    include_code  = Keyword.get(opts, :include_code,  false)
-    full_graph    = Keyword.get(opts, :full_graph,    nil)
+    include_code = Keyword.get(opts, :include_code, false)
+    full_graph = Keyword.get(opts, :full_graph, nil)
+    filter_calls = Keyword.get(opts, :filter_calls, true)
 
     # Precompute calls/callers once for the whole slice. Derived from CALLS edges
     # in the full graph so boundary nodes show what's beyond the current slice.
@@ -133,13 +159,19 @@ defmodule DirGraph.Analyzer do
 
         type = Map.get(meta, :type, "unknown")
 
-        if include_types == :all or type in include_types do
+        skip =
+          (filter_calls and type == "Call") or
+            not (include_types == :all or type in include_types)
+
+        if skip do
+          []
+        else
           node =
             %{
               id: vid,
               type: type,
               name: Map.get(meta, :name, vid),
-              file: Map.get(meta, :file),
+              file: meta |> Map.get(:file) |> relative_path(),
               line: Map.get(meta, :line),
               end_line: Map.get(meta, :end_line),
               visibility: Map.get(meta, :visibility),
@@ -149,21 +181,29 @@ defmodule DirGraph.Analyzer do
             |> Enum.into(%{})
 
           node =
-            if include_code and is_binary(node[:file]) and is_integer(node[:line]) do
-              Map.put(node, :code, read_node_source(node.file, node.line, node[:end_line]))
+            if include_code and is_binary(Map.get(meta, :file)) and is_integer(node[:line]) do
+              Map.put(
+                node,
+                :code,
+                read_node_source(Map.get(meta, :file), node.line, node[:end_line])
+              )
             else
               node
             end
 
           [attach_call_metadata(node, vid, calls_map, callers_map)]
-        else
-          []
         end
       end)
+
+    # Keep only edges whose endpoints are both in the emitted node set.
+    node_ids = MapSet.new(nodes, & &1.id)
 
     edges =
       subgraph
       |> Graph.edges()
+      |> Enum.filter(fn e ->
+        MapSet.member?(node_ids, e.v1) and MapSet.member?(node_ids, e.v2)
+      end)
       |> Enum.map(fn edge ->
         %{source: edge.v1, target: edge.v2, rel: edge.label}
       end)
@@ -176,10 +216,13 @@ defmodule DirGraph.Analyzer do
     }
 
     if calls_unavailable do
-      Map.put(payload, :_note,
+      Map.put(
+        payload,
+        :_note,
         "No CALLS edges found in graph. Call hierarchy was not extracted — " <>
-        "check that the language server is installed and supports callHierarchy. " <>
-        "Do not make assertions about call flows or knock-on effects based on this slice.")
+          "check that the language server is installed and supports callHierarchy. " <>
+          "Do not make assertions about call flows or knock-on effects based on this slice."
+      )
     else
       payload
     end
@@ -189,7 +232,9 @@ defmodule DirGraph.Analyzer do
   Prints a human-readable summary of the slice — useful for interactive CLI inspection.
   """
   def print_slice_summary(payload) do
-    IO.puts("\n=== Semantic Slice (#{payload.node_count} nodes, #{payload.edge_count} edges) ===\n")
+    IO.puts(
+      "\n=== Semantic Slice (#{payload.node_count} nodes, #{payload.edge_count} edges) ===\n"
+    )
 
     payload.nodes
     |> Enum.group_by(& &1.type)
@@ -258,10 +303,17 @@ defmodule DirGraph.Analyzer do
           |> Enum.flat_map(fn vid ->
             case CG.get_label(graph, vid) do
               %{type: type, file: file, line: line, name: name}
-                  when type in ["Function", "Module"] and is_binary(file) ->
+              when type in ["Function", "Module"] and is_binary(file) ->
                 if test_file?(file) do
-                  [%{id: vid, name: name, file: file, line: line,
-                     command: test_command(file, line, name)}]
+                  [
+                    %{
+                      id: vid,
+                      name: name,
+                      file: file,
+                      line: line,
+                      command: test_command(file, line, name)
+                    }
+                  ]
                 else
                   []
                 end
@@ -288,8 +340,10 @@ defmodule DirGraph.Analyzer do
       String.ends_with?(file, "_spec.rb") ->
         "bundle exec rspec #{file}:#{line}"
 
-      Enum.any?(~w(.test.ts .spec.ts .test.js .spec.js .test.jsx .spec.jsx),
-                &String.ends_with?(file, &1)) ->
+      Enum.any?(
+        ~w(.test.ts .spec.ts .test.js .spec.js .test.jsx .spec.jsx),
+        &String.ends_with?(file, &1)
+      ) ->
         "npx jest --testPathPattern=#{file}"
 
       String.ends_with?(file, "_test.go") ->
@@ -344,15 +398,17 @@ defmodule DirGraph.Analyzer do
   # Merges calls/callers metadata into a node map. Only adds fields when non-empty.
   # Callers are capped at @callers_display_cap; excess is indicated by callers_total.
   defp attach_call_metadata(node, vid, calls_map, callers_map) do
-    calls       = Map.get(calls_map, vid, [])
+    calls = Map.get(calls_map, vid, [])
     callers_all = Map.get(callers_map, vid, [])
-    callers     = Enum.take(callers_all, @callers_display_cap)
-    total       = length(callers_all)
+    callers = Enum.take(callers_all, @callers_display_cap)
+    total = length(callers_all)
 
     node
-    |> then(fn n -> if calls != [],    do: Map.put(n, :calls,         calls),  else: n end)
-    |> then(fn n -> if callers != [],  do: Map.put(n, :callers,       callers), else: n end)
-    |> then(fn n -> if total > @callers_display_cap, do: Map.put(n, :callers_total, total), else: n end)
+    |> then(fn n -> if calls != [], do: Map.put(n, :calls, calls), else: n end)
+    |> then(fn n -> if callers != [], do: Map.put(n, :callers, callers), else: n end)
+    |> then(fn n ->
+      if total > @callers_display_cap, do: Map.put(n, :callers_total, total), else: n
+    end)
   end
 
   # ----------------------------------------------------------------
@@ -400,6 +456,9 @@ defmodule DirGraph.Analyzer do
       _ -> vid
     end
   end
+
+  defp relative_path(nil), do: nil
+  defp relative_path(path), do: Path.relative_to_cwd(path)
 
   # Reads source lines for a node. Returns a string or nil if the file can't be read.
   defp read_node_source(file, start_line, end_line) do

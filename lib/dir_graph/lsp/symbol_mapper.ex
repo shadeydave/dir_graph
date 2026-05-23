@@ -38,18 +38,30 @@ defmodule DirGraph.LSP.SymbolMapper do
   # Extend this map to capture additional LSP symbol types.
 
   @kind_type %{
-    2  => "Module",        # Module
-    3  => "Namespace",     # Namespace
-    4  => "Package",       # Package
-    5  => "Class",         # Class
-    6  => "Function",      # Method
-    9  => "Function",      # Constructor
-    10 => "Enum",          # Enum
-    11 => "Interface",     # Interface
-    12 => "Function",      # Function
-    13 => "Variable",      # Variable (top-level only — children filtered by depth)
-    23 => "Struct",        # Struct
-    26 => "TypeParameter"  # TypeParameter
+    # Module
+    2 => "Module",
+    # Namespace
+    3 => "Namespace",
+    # Package
+    4 => "Package",
+    # Class
+    5 => "Class",
+    # Method
+    6 => "Function",
+    # Constructor
+    9 => "Function",
+    # Enum
+    10 => "Enum",
+    # Interface
+    11 => "Interface",
+    # Function
+    12 => "Function",
+    # Variable (top-level only — children filtered by depth)
+    13 => "Variable",
+    # Struct
+    23 => "Struct",
+    # TypeParameter
+    26 => "TypeParameter"
   }
 
   @extract_kinds Map.keys(@kind_type)
@@ -90,17 +102,18 @@ defmodule DirGraph.LSP.SymbolMapper do
     include = kind in @extract_kinds and (kind != @variable_kind or top_level)
 
     if include do
-      name     = Map.get(symbol, "name", "unknown")
-      type     = Map.fetch!(@kind_type, kind)
-      line     = start_line(symbol)
+      name = Map.get(symbol, "name", "unknown")
+      type = Map.fetch!(@kind_type, kind)
+      line = start_line(symbol)
       end_line = end_line(symbol)
-      node_id  = "#{type}:#{name}:L#{line}:#{file_path}"
+      node_id = "#{type}:#{name}:L#{line}:#{file_path}"
 
-      graph = CG.add_node(graph, node_id, type, name, %{
-        line: line,
-        end_line: end_line,
-        file: file_path
-      })
+      graph =
+        CG.add_node(graph, node_id, type, name, %{
+          line: line,
+          end_line: end_line,
+          file: file_path
+        })
 
       edge = if parent_id == file_node_id, do: "CONTAINS", else: "DEFINES"
       graph = CG.add_edge(graph, parent_id, node_id, edge)
@@ -142,7 +155,7 @@ defmodule DirGraph.LSP.SymbolMapper do
   defp lsp_line(symbol, range_key, bound) do
     case get_in(symbol, [range_key, bound, "line"]) do
       nil -> nil
-      n   -> n + 1
+      n -> n + 1
     end
   end
 end

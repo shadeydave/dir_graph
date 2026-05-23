@@ -113,21 +113,25 @@ defmodule DirGraph.RAG do
   @impl true
   def handle_cast({:index_node, node_id, text}, state) do
     project = state.project
+
     spawn(fn ->
       case Embeddings.embed(text) do
         {:ok, vector} ->
           VectorStore.put(node_id, vector)
           if project, do: Neo4j.update_embedding(node_id, project, vector)
+
         {:error, _} ->
           :skip
       end
     end)
+
     {:noreply, state}
   end
 
   @impl true
   def handle_cast({:index_file, graph, file_path}, state) do
     project = state.project
+
     node_ids =
       Graph.vertices(graph)
       |> Enum.filter(fn vid ->
@@ -144,7 +148,7 @@ defmodule DirGraph.RAG do
 
   @impl true
   def handle_cast({:index_graph, graph}, state) do
-    project  = state.project
+    project = state.project
     node_ids = Graph.vertices(graph)
     spawn(fn -> embed_nodes(graph, node_ids, project) end)
     {:noreply, state}
@@ -216,7 +220,7 @@ defmodule DirGraph.RAG do
 
       %{type: type, name: name, file: file, line: line} = meta ->
         end_line = Map.get(meta, :end_line)
-        source   = read_source(file, line, end_line)
+        source = read_source(file, line, end_line)
         "#{type} #{name}\n#{source}"
 
       %{type: type, name: name, file: file} ->

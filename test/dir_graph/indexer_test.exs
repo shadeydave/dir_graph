@@ -17,22 +17,24 @@ defmodule DirGraph.IndexerTest do
       vids = Graph.vertices(graph)
 
       assert Enum.any?(vids, fn v ->
-        case CG.get_label(graph, v) do
-          %{type: "File"} -> true
-          _ -> false
-        end
-      end)
+               case CG.get_label(graph, v) do
+                 %{type: "File"} -> true
+                 _ -> false
+               end
+             end)
     end
 
     test "creates a Module node with correct name" do
       {graph, _refs} = Indexer.index_file(@fixture_auth)
 
-      module = Graph.vertices(graph) |> Enum.find(fn v ->
-        case CG.get_label(graph, v) do
-          %{type: "Module", name: "SampleAuth"} -> true
-          _ -> false
-        end
-      end)
+      module =
+        Graph.vertices(graph)
+        |> Enum.find(fn v ->
+          case CG.get_label(graph, v) do
+            %{type: "Module", name: "SampleAuth"} -> true
+            _ -> false
+          end
+        end)
 
       assert module != nil
     end
@@ -94,8 +96,8 @@ defmodule DirGraph.IndexerTest do
     end
 
     test "merges into a provided graph (second param)" do
-      {g1, _}  = Indexer.index_file(@fixture_auth)
-      {g2, _}  = Indexer.index_file(@fixture_user, g1)
+      {g1, _} = Indexer.index_file(@fixture_auth)
+      {g2, _} = Indexer.index_file(@fixture_user, g1)
 
       v1 = Graph.vertices(g1) |> length()
       v2 = Graph.vertices(g2) |> length()
@@ -112,8 +114,8 @@ defmodule DirGraph.IndexerTest do
     test "adds IMPORTS edge between files when alias is resolved" do
       {g1, r1} = Indexer.index_file(@fixture_auth)
       {g2, r2} = Indexer.index_file(@fixture_user, g1)
-      all_refs  = r1 ++ r2
-      resolved  = Indexer.resolve_cross_file_refs(g2, all_refs)
+      all_refs = r1 ++ r2
+      resolved = Indexer.resolve_cross_file_refs(g2, all_refs)
 
       import_edges = Graph.edges(resolved) |> Enum.filter(fn e -> e.label == "IMPORTS" end)
       assert length(import_edges) >= 1
@@ -136,8 +138,8 @@ defmodule DirGraph.IndexerTest do
     end
 
     test "no-op on a path that is not in the graph" do
-      {graph, _}  = Indexer.index_file(@fixture_auth)
-      purged      = Indexer.purge_file(graph, "/nonexistent/file.ex")
+      {graph, _} = Indexer.index_file(@fixture_auth)
+      purged = Indexer.purge_file(graph, "/nonexistent/file.ex")
 
       assert Graph.vertices(purged) == Graph.vertices(graph)
     end
@@ -150,7 +152,11 @@ defmodule DirGraph.IndexerTest do
   describe "collect_files/1" do
     test "finds .ex files and skips non-source directories" do
       files = Indexer.collect_files("lib/")
-      assert Enum.all?(files, fn f -> Path.extname(f) in ~w(.ex .exs .js .ts .jsx .tsx .py .rb .go .rs) end)
+
+      assert Enum.all?(files, fn f ->
+               Path.extname(f) in ~w(.ex .exs .js .ts .jsx .tsx .py .rb .go .rs)
+             end)
+
       refute Enum.any?(files, &String.contains?(&1, "/_build/"))
       refute Enum.any?(files, &String.contains?(&1, "/deps/"))
     end
@@ -164,7 +170,7 @@ defmodule DirGraph.IndexerTest do
     @tag :tmp_dir
     test "round-trip preserves vertices and manifest", %{tmp_dir: dir} do
       {graph, _} = Indexer.index_file(@fixture_auth)
-      bin_path   = Path.join(dir, "test_graph.bin")
+      bin_path = Path.join(dir, "test_graph.bin")
 
       Indexer.save_graph(graph, bin_path)
 
